@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local research, instructions and generated builds
+/AGENTS.md
+/analysis/
+/dist/
+/generated/
+/output/
+
+# Player files, logs, captures and credentials
+*.ini
+*.config
+*.log
+*.bak
+*.dmp
+*.bin
+*.exe
+*.dll
+*.patch_*
+.env
+.env.*
+*.pem
+*.key
+
+# Local editor state
+.idea/
+.vscode/

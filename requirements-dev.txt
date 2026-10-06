@@ -1,0 +1,2 @@
+# LuaJIT runtime for the isolated regression checks.
+lupa==2.8
