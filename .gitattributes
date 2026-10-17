@@ -4,3 +4,6 @@
 *.md text eol=lf
 *.txt text eol=lf
 *.png binary
+# Preserve the exact native-source bytes checked by the embedded observer digest.
+/native/*.c -text
+/native/*.h -text

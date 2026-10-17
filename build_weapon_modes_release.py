@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -16,11 +17,12 @@ import shutil
 import sys
 import tempfile
 import zipfile
+from build_native_events import NATIVE_SOURCES, source_digest
 
 ROOT = Path(__file__).resolve().parent
 NAME = "mods/constantin/weapon_modes_trial"
 GUID = "c559d47d-474a-4e6c-a827-35deaa7fac0f"
-VERSION = "1.9.9"
+VERSION = "2.1.5"
 SENTINEL = "ConstantinWeaponModesTrial"
 ARCHIVE = "9ba626afa44a3aa3.patch_0"
 FLAVORS = ("release", "diagnostic")
@@ -63,9 +65,12 @@ COMPONENTS = (
     ("EnglishText", "locales/en.lua"),
     ("Text", "weaponflow_text.lua"),
     ("NativeReader", "native_equipment_reader.lua"),
+    ("NativeWeaponEventsPayload", "native_weapon_events_payload.lua"),
+    ("NativeWeaponEvents", "native_weapon_events.lua"),
     ("NativeTextLanguage", "native_text_language.lua"),
     ("EquipContext", "native_equip_context.lua"),
     ("WeaponModes", "native_weapon_modes.lua"),
+    ("NativeWeaponSelection", "native_weapon_selection.lua"),
     ("Flashlight", "native_flashlight_state.lua"),
     ("ProgrammableAmmo", "native_programmable_ammo.lua"),
     ("LaserGuide", "native_laser_guide.lua"),
@@ -107,6 +112,14 @@ def make_source(flavor: str, *, root: Path = ROOT, version: str = VERSION,
     if feature not in FEATURES:
         raise ValueError("Unknown payload feature")
     root = Path(root)
+    payload=(root/'src/native_weapon_events_payload.lua').read_text(encoding='utf-8')
+    original=re.search(r'source_sha256="([0-9a-f]{64})"',payload)
+    image_sha=re.search(r'(?<!_)sha256="([0-9a-f]{64})"',payload)
+    chunks=re.findall(r'"([0-9a-f]+)"',payload.split('hex=',1)[-1])
+    image=bytes.fromhex(''.join(chunks))
+    if not original or original[1]!=source_digest(root/'native') or not image_sha or \
+       not image.startswith(b'MZ') or len(image)<1024 or hashlib.sha256(image).hexdigest()!=image_sha[1]:
+        raise ValueError('Native event payload is missing, corrupt or stale; run build_native_events.py')
     coordinator = (root / "src/native_weapon_defaults.lua").read_text(encoding="utf-8")
     if "BuildConfig" not in coordinator or SENTINEL not in coordinator:
         raise ValueError("Coordinator must consume BuildConfig and preserve the Trial duplicate-load sentinel")
@@ -225,6 +238,9 @@ def _attachments(root: Path, flavor: str, sources: dict[tuple[str, str], bytes])
     if locale_help.is_file():
         files["Source/src/locales/README.md"] = locale_help.read_bytes()
     files["Source/build_weapon_modes_release.py"] = (root / "build_weapon_modes_release.py").read_bytes()
+    files["Source/build_native_events.py"] = (root / "build_native_events.py").read_bytes()
+    for name in NATIVE_SOURCES:
+        files[f"Source/native/{name}"]=(root/'native'/name).read_bytes()
     files["Source/tests/test_weapon_modes_release.py"] = (root / "tests/test_weapon_modes_release.py").read_bytes()
     for name in DOCUMENTS:
         files[f"Source/release/{name}"] = files[name]
