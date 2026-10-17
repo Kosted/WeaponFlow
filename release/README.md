@@ -1,6 +1,6 @@
 # WeaponFlow
 
-Package: **WeaponFlow-v1.9.9.zip**. Русская инструкция: **README-RU.md**.
+Package: **WeaponFlow-v2.1.5.zip**. Russian instructions: **README-RU.md**.
 
 **Your settings when you equip. One button to switch them in combat.**
 
@@ -10,8 +10,9 @@ Package: **WeaponFlow-v1.9.9.zip**. Русская инструкция: **READM
 
 ## Quick start
 
-Install **WeaponFlow** through **HD2 Arsenal** with **Bingus Shared Loader v17**
-and **[Mod Bindings Menu v2.1](https://www.nexusmods.com/helldivers2/mods/16478)**.
+Install **WeaponFlow** through **HD2 Arsenal** with **Bingus Shared Loader**
+and **[Mod Bindings Menu v2.1 or v2.2](https://www.nexusmods.com/helldivers2/mods/16478)**.
+With MBM v2.2, use Shared Loader v18 or newer.
 Enable **WeaponFlow**. Controls work at startup;
 open **Options → Mouse & Keyboard → MODS → WeaponFlow** to change them.
 
@@ -27,13 +28,25 @@ Clearing leaves the weapon's current settings unchanged. It does not clear your 
 
 ## Help while you configure
 
-**Hold R and tap P** to see saved values, the default preset, your swap hotkey and the settings path. P can be released; number keys save while R stays held. Release R to close help.
+In your first mission, a short checklist guides you through opening presets, opening HUD settings and assigning Swap presets. Completed steps are saved. Once all three are done, it stays hidden until a full mod reset.
 
-**Hold R and tap H** to open HUD help without changing the indicator. Further H presses choose its displayed setting or **Hide**. While this help is open, use the **arrow keys** to move the indicator; H need not stay held. This help stays until you release R. Both panels show the held weapon-menu button and the last button you press while help is open. Values update as settings change. An unassigned swap button is marked **Assign it in settings!** in preset help.
+**Hold R and tap P** to see saved values, the default preset and your swap hotkey. P can be released; number keys save while R stays held. Release R to close help.
+
+**Hold R and tap H** to open HUD help without changing the indicator. Further H presses choose its displayed setting or **Hide**. While this help is open, use the **arrow keys** to move the indicator; H need not stay held. This help stays until you release R. Values update as settings change. An unassigned swap button is marked **Assign it in settings!** in preset help.
 
 The fixed help panel sits near the bottom of the screen, separate from the movable mode indicator.
 
-Saved preset values appear as game icons joined by **+**, with RPM and scope numbers kept beside them. Missing icons fall back to readable values. A dark translucent background keeps the help readable; yellow button badges show your actual keyboard and mouse bindings, including remapped keys.
+Movement arrows pointing beyond the screen are hidden. A hidden HUD has a nearby reveal hint. The indicator briefly flashes gold when its displayed mode changes in combat.
+
+While preset help is open, rounded yellow brackets on the weapon wheel mark saved values
+with **P1 / P2 / P3**. Shared values carry multiple labels. HUD help highlights
+the displayed value and brackets the indicator, with arrow-key badges around it.
+A hidden indicator appears as a translucent preview with your HUD-menu button
+shown on it. Frames gently shimmer; labels and arrows stay steady.
+
+The lower panels keep the controls you need, without repeating marked values
+or the movement arrows. Empty presets and saved settings unavailable on the
+current weapon remain explicit. Yellow button badges show your actual bindings.
 
 ## Choose what you see
 
@@ -74,9 +87,8 @@ Presets support fire mode, Safe/Unsafe, primary/secondary or underbarrel fire se
 
 ## Language and sharing presets
 
-**Auto** follows the game's text language and uses English when that language is
-unavailable. With either help panel open, **F9** cycles **Auto**, English and the other available languages.
-HUD text and WeaponFlow's action names in MODS change immediately. The choice is saved.
+WeaponFlow follows the game's text language automatically, using English if a
+translation is unavailable. This applies to HUD text and action names in MODS.
 
 Included: English, Russian, French, German, Italian, Polish, Japanese, Korean,
 Spanish (Spain and Latin America), Portuguese (Portugal and Brazil), and
@@ -85,12 +97,12 @@ Simplified/Traditional Chinese. Weapon settings use their localized game names.
 With **preset help open**, **C** copies all account presets to the clipboard.
 **V** imports from the clipboard, **replacing all account presets**. Invalid
 preset text is ignored without changing anything. Flashlight and HUD preferences
-are separate from transferred presets. F9, C and V are fixed shortcuts, active
+are separate from transferred presets. C and V are fixed shortcuts, active
 only in their respective help panels.
 
 ## Hotkeys and settings
 
-Requires **[Mod Bindings Menu v2.1](https://www.nexusmods.com/helldivers2/mods/16478)**.
+Requires **[Mod Bindings Menu v2.1 or v2.2](https://www.nexusmods.com/helldivers2/mods/16478)**.
 Open **Options → Mouse & Keyboard → MODS → WeaponFlow** to set your controls.
 The four actions are **Preset menu**, **Swap presets**, **HUD menu** and **Reset mod**.
 Preset/HUD menus default to **P/H, Press**. Clear uses a double press of your
@@ -101,7 +113,7 @@ Tap, Double Tap, Long Hold or Long Release. The game processes these inputs.
 Held actions activate once per hold. Clearing a binding disables that action.
 Swap presets and Reset mod start unassigned. Assign the swap button in MODS.
 
-WeaponFlow uses the bindings accepted by Mod Bindings Menu v2.1 and evaluated
+WeaponFlow uses the bindings accepted by Mod Bindings Menu v2.1 or v2.2 and evaluated
 by the game. Help displays your actual bindings.
 
 **Reset mod** restores the bundled starter presets, clears the shared flashlight
@@ -118,4 +130,4 @@ logs alongside WeaponFlow and is not needed for normal play.
 
 ## Credits
 
-**CowboyBingus** — Bingus Shared Loader. **DDRK1NG** — rendering inspiration. **Filediver** — resource extraction. **Liberation Fonts and Noto** — HUD fonts. Game icons and strings belong to the Helldivers 2 rights holders. Full notices and font licenses are included in the download.
+**CowboyBingus** — Bingus Shared Loader. **DDRK1NG** — rendering inspiration. **Filediver** — resource extraction. **Exo 2, Liberation Fonts and Noto** — HUD fonts. Game icons and strings belong to the Helldivers 2 rights holders. Full notices and font licenses are included in the download.

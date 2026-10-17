@@ -1,8 +1,16 @@
 # Asset origins
 
+## Native event observer
+
+WeaponFlow's game notification observer and copied-event queue are original
+project code. The helper uses only Windows system library calls for its own
+loading, safe copied reads, synchronization and module ownership checks.
+It does not contain MinHook or patch executable game code. The helper is
+extracted automatically; no additional player dependency is needed.
+
 ## Required key-binding integration
 
-WeaponFlow integrates with **Mod Bindings Menu v2.1**, by **CowboyBingus**,
+WeaponFlow integrates with **Mod Bindings Menu v2.1 or v2.2**, by **CowboyBingus**,
 through its addon API. Install it separately to use and configure WeaponFlow controls
 in the game's MODS tab. The dependency itself is not bundled with WeaponFlow.
 
@@ -36,12 +44,14 @@ This is an unofficial modification and is not endorsed by the game's creators.
 
 ## HUD labels
 
-The numeric and short text labels use **Weapon Defaults HUD Label**, a baked
-antialiased Latin/Cyrillic subset derived from Liberation Sans Bold. This derivative name
-does not use the original font's reserved name. The original font is by the
-Liberation Fonts project, with digitized-data copyright 2010 Google Corporation
-and copyright 2012 Red Hat, Inc. The masks are distributed under the SIL Open
-Font License 1.1; the full notices and license are in `FONT-LICENSE.txt`.
+The interface uses **WeaponFlow UI**, a raster derivative of **Exo 2 Medium and
+Bold**. Exo 2 is Copyright 2013 The
+Exo 2 Project Authors: https://github.com/google/fonts/tree/main/ofl/exo2 .
+Encountered glyphs are decoded lazily and filtered to actual display pixels.
+Retained fallback glyphs come from Liberation Sans Bold, with digitized-data
+copyright 2010 Google Corporation and copyright 2012 Red Hat, Inc.
+The masks are distributed under the SIL Open Font License 1.1; the full
+notices and licenses are in `FONT-LICENSE.txt`.
 These labels are separate from the game icons described above. No font
 installation is needed and the game's font/material loader is not used.
 
