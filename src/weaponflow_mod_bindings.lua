@@ -1,7 +1,7 @@
--- Required Mod Bindings Menu v2.1. The game owns assignments and triggers.
+-- Required Mod Bindings Menu v2.1 or v2.2. The game owns assignments and triggers.
 -- Ordinary startup/remaps are read-only; no controls file is imported or saved.
 -- Owned writes are limited to one-time initial defaults and explicit Reset.
-local M={version="0.6.0"}
+local M={version="0.6.1"}
 function M.available(menu)
     return type(menu)=="table" and menu.api==1 and type(menu.version)=="number" and menu.version>=3 and
         type(menu.register_binding)=="function" and type(menu.ready)=="function" and type(menu.is_down)=="function"
@@ -11,21 +11,49 @@ local IDS={save="constantin.weaponflow.presets",
 local ORDER=Bindings.active_names
 M.ids=IDS
 local MAX_ASSIGNMENTS=256*1024
+local MAX_SESSION=9007199254740991
 
 function M.parse_assignments(text)
     if type(text)~="string" or #text>MAX_ASSIGNMENTS then return nil,"invalid menu assignments file" end
-    local found,codes={},{}
+    local found,codes,actions={},{},{}
+    local format,session,complete=1,nil,false
     for line in (text.."\n"):gmatch("([^\r\n]*)[\r\n]") do
         if line~="" then
-            local id,group,action=line:match("^([^\t]+)\t(%d+)\t(%d+)$")
-            if not id then return nil,"malformed menu assignments record" end
-            group,action=tonumber(group),tonumber(action)
-            if group>65535 or action>65535 or found[id] then return nil,"ambiguous menu assignments record" end
-            local code=group*65536+action
-            if codes[code] then return nil,"duplicate menu native action assignment" end
-            found[id]={group=group,action=action,code=code};codes[code]=id
+            if complete then return nil,"menu assignments data after end" end
+            if line=="format 2" and format==1 and next(found)==nil then
+                format=2
+            elseif format==2 and session==nil then
+                session=tonumber(line:match("^session (%d+)$"))
+                if not session or session>MAX_SESSION then return nil,"invalid menu assignments session" end
+            elseif format==2 and line=="end" then
+                complete=true
+            else
+                local id,group,action,seen
+                if format==2 then id,group,action,seen=line:match("^([^\t]+)\t(%d+)\t(%d+)\t(%d+)$")
+                else id,group,action=line:match("^([^\t]+)\t(%d+)\t(%d+)$") end
+                if id then
+                    group,action,seen=tonumber(group),tonumber(action),tonumber(seen)
+                    if group>65535 or action>65535 or found[id] or
+                       (format==2 and (not seen or seen>session)) then return nil,"ambiguous menu assignments record" end
+                    local code=group*65536+action
+                    if codes[code] then return nil,"duplicate menu native action assignment" end
+                    found[id]={group=group,action=action,code=code,seen=seen};codes[code]=id
+                else
+                    local group,action,record=line:match("^action (%d+):(%d+) (.+)$")
+                    group,action=tonumber(group),tonumber(action)
+                    if format~=2 or not group or group>65535 or action>65535 then
+                        return nil,"malformed menu assignments record"
+                    end
+                    local code=group*65536+action
+                    local cleared,first,last=record:match("^cleared (%d+) found (%x+) left (%x+)$")
+                    if actions[code] or (record~="clear" and (not cleared or tonumber(cleared)>MAX_SESSION or
+                       #first>8 or #last>8)) then return nil,"invalid menu action metadata" end
+                    actions[code]=true
+                end
+            end
         end
     end
+    if format==2 and (session==nil or not complete) then return nil,"incomplete menu assignments file" end
     return found
 end
 
@@ -130,6 +158,15 @@ function M.new(options)
         if text==nil then self.assignments,self.assignments_error=nil,reason or "menu assignments unavailable";return end
         self.assignments,self.assignments_error=M.parse_assignments(text)
     end
+    local function current_assignment(name)
+        local value=self.assignments and self.assignments[IDS[name]]
+        local record=self.records[name]
+        -- v2.2 publishes reservations after registration, in its next update.
+        -- An older on-disk owner must not authorize native reads or writes.
+        if value and record and record.minimum_seen and
+           (not value.seen or value.seen<record.minimum_seen) then return nil end
+        return value
+    end
     prepare_publication=function(changes,config)
         if type(options.get_input_snapshot)~="function" or type(options.validate_input_snapshot)~="function" then
             return nil,"read-only input context validation unavailable"
@@ -147,8 +184,8 @@ function M.new(options)
             end
             local owned
             for _,name in ipairs(ORDER) do
-                local current=self.assignments[IDS[name]]
-                if current and current.code==change.code then owned=IDS[name];break end
+                local current=current_assignment(name)
+                if current and current.code==change.code then owned=name;break end
             end
             if not owned then return nil,"binding change is not owned by WeaponFlow" end
             seen[change.code]=true;identities[owned]=change.code
@@ -160,15 +197,15 @@ function M.new(options)
             return nil,why or "input snapshot profile differs"
         end
         local function validate()
-            -- Resolve the actual active account/path and the sidecar again at
-            -- every native write/readback/rollback. Old ownership never gives
+            -- Revalidate this session's input preimage and sidecar at every
+            -- native write/readback/rollback. Old ownership never gives
             -- permission to change an action reassigned to another addon.
             local safe,valid,reason=pcall(options.validate_input_snapshot,snapshot)
             if not safe or valid~=true then return nil,safe and reason or valid end
             assignments(0,true)
             if not self.assignments then return nil,self.assignments_error or "menu ownership unavailable" end
-            for id,code in pairs(identities) do
-                local actual=self.assignments[id]
+            for name,code in pairs(identities) do
+                local actual=current_assignment(name)
                 if not actual or actual.code~=code then return nil,"WeaponFlow binding ownership changed" end
             end
             return true
@@ -377,7 +414,7 @@ function M.new(options)
         local good,menu=pcall(get_menu)
         if not good or not M.available(menu) then
             self.records={};self.menu=nil;self.cached=nil
-            result.reason="Mod Bindings Menu v2.1 is required";return result
+            result.reason="Mod Bindings Menu v2.1 or v2.2 is required";return result
         end
         if menu~=self.menu then
             self.menu,self.records=menu,{}
@@ -407,11 +444,17 @@ function M.new(options)
             for _,name in ipairs(ORDER) do
                 if not self.records[name] then
                     local row_label=function() return label(name) end
+                    local revision=menu.revision
                     local ok,registered,why=pcall(menu.register_binding,IDS[name],row_label,nil,{category="WeaponFlow"})
                     if ok and registered==true then
+                        local old=previous and previous[IDS[name]]
                         self.records[name]={label=row_label,next_read=0,
                             new_assignment=missing or previous~=nil and previous[IDS[name]]==nil,
                             config_before_registration=config,editor_observed=editing==true}
+                        if type(revision)=="number" and menu.revision~=revision then
+                            self.records[name].minimum_seen=(old and old.seen or 0)+1
+                            self.records[name].publication_until=time+2
+                        end
                         force=true
                     else result.registration_error=tostring(ok and why or registered) end
                 end
@@ -424,9 +467,13 @@ function M.new(options)
             local record=self.records[name]
             if record and editing==true then record.editor_observed=true end
             if record and (wanted(name,context) or self.pending_publication[name]) then
-                local assignment=self.assignments and self.assignments[IDS[name]]
+                local assignment=current_assignment(name)
                 local reason
-                if not assignment then reason=self.assignments_error or "menu action assignment is unknown"
+                if not assignment then
+                    reason=self.assignments_error or "menu action assignment is awaiting publication"
+                    if record.minimum_seen and time<(record.publication_until or 0) then
+                        self.next_assignments=math.min(self.next_assignments,time+0.1)
+                    end
                 elseif not ready then reason="native actions are loading"
                 else
                     if assignment.code~=record.code then
@@ -467,7 +514,7 @@ function M.new(options)
             local binding=result[name]
             if binding then statuses[#statuses+1]=name.."="..(binding.ready and "game mapping" or tostring(binding.reason)) end
         end
-        result.reason="Mod Bindings Menu v2.1: "..table.concat(statuses,"; ")
+        result.reason="Mod Bindings Menu: "..table.concat(statuses,"; ")
         self.next_editor_poll=time+0.1;self.was_editing=editing;self.cached={}
         for k,v in pairs(result) do if k~="default_events" and k~="diagnostics" then self.cached[k]=v end end
         return result
@@ -491,7 +538,7 @@ function M.new(options)
             local enabled=(name=="hud" and context.hud_enabled==true) or
                 (name=="reset" and context.reset_enabled==true) or
                 (name~="hud" and name~="reset" and context.presets_enabled==true)
-            local assignment=self.assignments and self.assignments[IDS[name]]
+            local assignment=current_assignment(name)
             local observed=record and assignment and assignment.code==record.code and record.raw and not record.read_error
             if not enabled then
                 binding.ready=false;binding.reason="feature disabled"
@@ -499,7 +546,7 @@ function M.new(options)
                 if record then record.event=nil;record.idle_released=nil end
             elseif not available or not ready or not observed then
                 binding.ready=false
-                binding.reason=not available and "Mod Bindings Menu v2.1 is required" or
+                binding.reason=not available and "Mod Bindings Menu v2.1 or v2.2 is required" or
                     (record and record.read_error or "native game mappings are loading")
                 if record then record.event=nil;record.idle_released=nil end
             elseif binding.ready then
@@ -542,11 +589,16 @@ function M.new(options)
 
     function self:reset(before_write)
         local ok,menu=pcall(get_menu)
-        if not ok or not M.available(menu) then return nil,"Mod Bindings Menu v2.1 is required" end
+        if not ok or not M.available(menu) then return nil,"Mod Bindings Menu v2.1 or v2.2 is required" end
         if type(before_write)~="function" then return nil,"reset backup callback required" end
         assignments(0,true)
         if not self.assignments then
             if self.assignments_error=="missing" then
+                for _,name in ipairs(ORDER) do
+                    if self.records[name] and self.records[name].minimum_seen then
+                        return nil,"menu action assignment is awaiting publication"
+                    end
+                end
                 local ok,backed,why=pcall(before_write)
                 if ok and backed==true then return {status="cleared",actions=0} end
                 return nil,ok and why or backed
@@ -555,7 +607,10 @@ function M.new(options)
         end
         local codes={}
         for _,name in ipairs(ORDER) do
-            local value=self.assignments[IDS[name]]
+            local value=current_assignment(name)
+            if not value and self.records[name] and self.records[name].minimum_seen then
+                return nil,"menu action assignment is awaiting publication"
+            end
             if value then codes[#codes+1]=value.code end
         end
         if #codes==0 then

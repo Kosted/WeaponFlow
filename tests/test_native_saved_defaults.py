@@ -149,14 +149,24 @@ local Flashlight={cycle={signature_hex='41'},inspect=function()
  env.light_reads=(env.light_reads or 0)+1
  if env.light_failure then return nil,'fixture flashlight unavailable' end
  return {present=env.flashlight==true and not env.light_absent,selected=env.light_value or 0,offered_values={0,1,2},
-  module_bytes=env.light_module or 'light',module_entity={eid=77}}
+  module_bytes=env.light_module or string.rep('L',24),module_entity={eid=77}}
 end}
-local WeaponUI={inspect=function()
+local WeaponUI={context=function()return {context_kind=env.ship and 3 or 4}end,inspect=function()
  if env.card_throw then error('fixture card validation exception') end
- return {hidden=not env.card_open,cached_eid=env.card_eid or env.eid,display_eid=env.card_display or env.card_eid or display()}
+ return {context_kind=env.ship and 3 or 4,hidden=not env.card_open,cached_eid=env.card_eid or env.eid,display_eid=env.card_display or env.card_eid or display()}
 end,invalidate=function(_,observed)
  env.invalidated_display=observed.active_weapon.display_eid
  return {status='already_dirty',hidden=false,dirty=true,cached_eid=env.eid,display_eid=env.eid}
+end,choice_geometry=function(_,_,modes)
+ if not env.wheel_geometry or env.wheel_geometry_failure then return nil,'fixture geometry unavailable' end
+ local directions={}
+ for side,dir in pairs(modes.directions) do
+  directions[side]={}
+  for index,value in ipairs(dir.choices or {}) do
+   directions[side][index]={value=value,slot=index-1,x=800+index*100,y=500,w=80,h=80}
+  end
+ end
+ return {directions=directions}
 end}
 local ProgrammableAmmo={inspect=function()
  env.ammo_reads=env.ammo_reads+1
@@ -190,6 +200,7 @@ local input={profile_id='76561198000000000',input_path='fixture'}
 function input:poll(_,_,controls) env.poll_presets=controls.presets_enabled;env.poll_diagnostics=controls.diagnostics_enabled;
  env.poll_hud_move_armed=controls.hud_move_armed;
  return {pressed=env.pressed,held_reload=env.held,down=env.down,
+ gameplay_allowed=not env.menu and not env.gate_failure,cycle_assigned=env.cycle_assigned==true,
  grenade_pressed=env.grenade_pressed,grenade_label=env.grenade_label,grenade_reason=env.grenade_reason,
  save_held=env.save_held,card_label=env.card_label or 'R',save_label=env.save_label or 'P',
  hud_label=env.hud_label or 'H',cycle_label=env.cycle_label or 'F8',
@@ -199,16 +210,26 @@ function input:poll(_,_,controls) env.poll_presets=controls.presets_enabled;env.
  save_preset=env.save_preset,preset_pressed=env.preset_pressed,cycle_pressed=env.cycle_pressed,cycle_ready=env.cycle_ready,
  hud_move_active=env.hud_move_active,hud_move=env.hud_move,hud_move_reason=env.hud_move_reason,
  hud_select_pressed=env.hud_select_pressed,hud_display_pressed=env.hud_display_pressed,menu_diagnostics=env.menu_diagnostics,
- locale_pressed=env.locale_pressed,contextual_help_open=controls.help_open,help_instance=controls.help_instance,
- export_label='C',import_label='V',locale_label='F9'} end
+ contextual_help_open=controls.help_open,help_instance=controls.help_instance,
+ export_label='C',import_label='V'} end
 function input:refresh() self.profile_valid=not env.invalid_profile end
-function input:cycle_language(_,_,guard)
- if guard()~=true then return nil,'fixture contextual guard rejected' end
- local selected=Text.next_language();Text.set_language(selected);return selected
-end
 function input:publish_reset_defaults() env.reset_defaults=true end
 function input:consume_clear() env.consumed_clear=(env.consumed_clear or 0)+1 end
-function input:ensure_menu_state() env.menu_ensures=(env.menu_ensures or 0)+1;return true end
+function input:ensure_menu_state()
+ env.menu_ensures=(env.menu_ensures or 0)+1
+ if env.onboarding_enabled then
+  local function progress()
+   env.intro_progress=env.intro_progress or {first_run=true,presets=false,hud=false,swap=false}
+   local copy={};for k,v in pairs(env.intro_progress) do copy[k]=v end;return copy
+  end
+  self.menu_state={onboarding=function() return progress() end,complete_step=function(_,name)
+   if env.intro_write_failure then return nil,'fixture onboarding write failure' end
+   local value=progress();value[name]=true;value.first_run=not (value.presets and value.hud and value.swap)
+   env.intro_progress=value;env.intro_saves=(env.intro_saves or 0)+1;return progress()
+  end}
+ end
+ return true
+end
 function input:reset_menu_bindings(before_write)
  env.reset_binding_attempts=(env.reset_binding_attempts or 0)+1
  local backed,why=before_write();if not backed then return nil,why end
@@ -296,9 +317,15 @@ local HudLayout={new=function()
  env.hud_layout={display=env.hud_reset_committed and 'both' or env.saved_hud_display or 'both'};return env.hud_layout
 end}
 local WeaponHudIcons={}
-local NativeHudIcons={inspect=function()
+local NativeHudIcons={inspect=function(_,_,modes,_,side)
  env.hud_reads=(env.hud_reads or 0)+1
  if env.hud_read_throw then error('fixture HUD reader failure') end
+ if env.property_icons and side and modes.directions[side] then
+  if env.property_icon_failure then return nil,'fixture property native identity changed' end
+  local dir=modes.directions[side]
+  return {directions={[side]={kind=dir.kind,current=dir.current,hash_hex=dir.current==2 and
+   '3efff09cd12fb89a' or '131742904d846798'}}}
+ end
  return {directions={}}
 end,ammo_labels=function()
  env.help_ammo_reads=(env.help_ammo_reads or 0)+1
@@ -314,6 +341,16 @@ end,ammo_labels=function()
                  [3]={kind='firemode',hash_hex='131742904d846798',slot=1}}}
  end}
 local hud={}
+function hud:edit(enabled,hidden,key)
+ enabled=enabled==true
+ if enabled and hidden==nil then hidden=env.hud_ghost else hidden=hidden==true end
+ local changed=env.hud_editing~=enabled or env.hud_ghost~=hidden or env.hud_edit_key~=key
+ env.hud_editing,env.hud_ghost,env.hud_edit_key=enabled,hidden,key
+ return changed
+end
+function hud:editor_bounds()
+ if env.hud_editing then return {x=1000,y=600,w=80,h=90,hidden=env.hud_ghost,key=env.hud_edit_key} end
+end
 function hud:cycle_display()
  if env.hud_display_failure then return nil,'fixture HUD settings disk failure' end
  self.display=({both='icon',icon='text',text='both'})[self.display]
@@ -345,7 +382,7 @@ function hud:render()
  if env.hud_render_unavailable then return nil,'fixture viewport unavailable' end
  env.hud_renders=(env.hud_renders or 0)+1
 end
-function hud:hide() env.hud_hidden=true end
+function hud:hide() env.hud_hidden=true;env.hud_editing=false end
 function hud:cancel_move() env.hud_moving=false;env.hud_cancel_moves=(env.hud_cancel_moves or 0)+1;return true end
 function hud:finish_move()
  if env.hud_moving then env.hud_finishes=(env.hud_finishes or 0)+1;env.hud_moving=false end
@@ -361,12 +398,74 @@ function hud:shutdown()
  return {status='destroyed'}
 end
 local WeaponHud={new=function(options) hud.display=options.display;env.hud_display=options.display;return hud end}
-local HelpHud={new=function(options) env.help_has_icons=options.icons==WeaponHudIcons;return {
+local HelpHud={new=function(options)
+ if options.onboarding then return {
+  set=function(_,lines) env.intro_lines=lines;return true end,
+  render=function() env.intro_visible=true;return true end,
+  hide=function() env.intro_visible=false end,
+  shutdown=function() env.intro_visible=false;env.intro_shutdowns=(env.intro_shutdowns or 0)+1;return {status='destroyed'} end,
+ } end
+ env.help_has_icons=options.icons==WeaponHudIcons;return {
  set=function(_,lines) if env.help_set_throw then error('fixture help failure') end;env.help_lines=lines;return true end,
+ set_overlay=function(_,marks,indicator) env.wheel_marks=marks;env.indicator=indicator;return true end,
  render=function() env.help_visible=true;return true end,
- hide=function() env.help_visible=false end,
+ hide=function() env.help_visible=false;env.wheel_marks=nil;env.indicator=nil end,
  shutdown=function() env.help_visible=false;env.help_shutdowns=(env.help_shutdowns or 0)+1;return {status='destroyed'} end,
 } end}
+-- The synthetic engine emits notifications when its fixture state changes.
+-- This replaces the old fake reader:watch; production has no such polling.
+NativeWeaponEvents={new=function()
+ local sequence=0;local tracked;local gear,modes,light;local queued={}
+ local function signature(names)
+  local values={};for _,name in ipairs(names)do values[#values+1]=tostring(env[name])end
+  return table.concat(values,'|')
+ end
+ local function push(e)sequence=sequence+1;e.sequence=sequence;queued[#queued+1]=e end
+ local self={}
+ function self:matches(rva,bytes)return reader.api.read(reader.game+rva,#bytes)==bytes end
+ function self:track(value)tracked=value end
+ function self:own_call(operation,...)
+  local before=env.light_value;local result=operation(...)
+  if before~=env.light_value then env.own_light=env.light_value end
+  return result
+ end
+ function self:shutdown()env.event_shutdowns=(env.event_shutdowns or 0)+1;return true end
+ function self:drain()
+  if env.event_failure then return nil,'fixture native event queue failed'end
+  if env.events_only then local result=queued;queued={};return result end
+  local g=signature({'eid','avatar','removed','inventory_revision','utility','unknown','context_fail','reader_failure','blocked','not_ready'})
+  local gear_changed=g~=gear
+  if gear_changed then
+   gear=g
+   local current=snapshot();local parent=tracked and tracked.active_weapon.entity.eid or 10
+   if env.context_fail or env.reader_failure or env.blocked then
+    push({kind=5,action=1,flags=0})
+   else
+    local main=env.eid~=0 and not env.utility and not env.unknown
+    push({kind=1,observed=true,main=main,empty=env.eid==0,flags=1,eid=env.eid,
+     avatar_bytes=current.avatar_bytes,weapon_bytes=current.active_weapon.bytes,
+     slots={main and env.eid or 0,not env.removed and parent or 0,0},
+     selection_bytes=current.active_weapon.wielder_selection_bytes})
+   end
+  end
+  local m=signature({'slot','ammo','ammo_slot','guide','laser','scope','secondary','secondary_slot','reverse_secondary',
+   'no_right','right_unreadable','right_presence_unknown','single_fire','three_fire','mode_failure',
+   'hud_read_fail','icon_failure','gate_failure','reader_failure'})
+  if m~=modes then modes=m;push({kind=4,action=3,eid=env.eid,flags=0})end
+  local l=signature({'light_value','light_module','flashlight','light_absent','light_failure'})
+  if l~=light then
+   local initial=light==nil;light=l
+   local value=env.light_value or 0;local own=env.own_light==value;env.own_light=nil
+   push({kind=3,action=gear_changed and 0 or 5,eid=env.eid,flags=1,own=own,
+    changed=not initial and not gear_changed and not env.light_failure,
+    light=value,module_bytes=env.light_module or string.rep('L',24),
+    avatar_bytes=snapshot().avatar_bytes,weapon_bytes=snapshot().active_weapon.bytes})
+  end
+  local result=queued;queued={};return result
+ end
+ env.native_push=push
+ return self
+end}
 return env,store,NativeReader,WeaponModes,Flashlight,WeaponUI,DefaultsInput,DefaultsStore,ProgrammableAmmo,LaserGuide,EquipContext,PresetInputGate,WeaponHudIcons,NativeHudIcons,WeaponHud,HudLayout,HelpHud,SecondaryFire
 '''
 
@@ -377,6 +476,7 @@ class CoordinatorSave(unittest.TestCase):
     def setUp(self):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         load_text(self.lua)
+        self.lua.globals().HudFont=self.lua.eval('{heading={},glyphs=setmetatable({},{__index=function()return {}end})}')
         self.lua.globals().PresetsTransfer=self.lua.execute((ROOT/'src/weaponflow_presets_transfer.lua').read_text())
         self.lua.globals().BuildConfig = self.lua.table_from({
             'version': '1.6.3', 'diagnostics': self.diagnostics,'hud':getattr(self,'hud_enabled',False),
@@ -386,6 +486,20 @@ class CoordinatorSave(unittest.TestCase):
         self.lua.execute('ModBindings={available=function()return true end};ModBindingsMenu={}')
         values = self.lua.execute(HARNESS)
         self.env, self.store, *modules = values
+        self.lua.globals().NativeWeaponSelection = self.lua.eval('''function(env) return {new=function()return {
+            apply=function(_,reader,snapshot,side,value,fresh)
+                env.directs=(env.directs or 0)+1
+                if env.direct_failure then return nil,'fixture direct selection failure' end
+                local dir=fresh.directions[side];local slot
+                for i,v in ipairs(dir.slot_values)do if v==value then slot=i-1 end end
+                assert(slot~=nil,'unoffered direct target')
+                env.actions=env.actions or {};env.actions[#env.actions+1]=dir.action_enum
+                if not env.no_transition then env.slot=slot end
+                return {slot=slot}
+            end}end}end''')(self.env)
+        self.env.onboarding_enabled=getattr(self,'onboarding_enabled',False)
+        self.lua.globals().NativeTextLanguage=self.lua.eval(
+            'function(env)return {read=function()return {tag=env.language or "en"}end}end')(self.env)
         self.env.saved_hud_display=getattr(self,'hud_display','both')
         if getattr(self, 'real_store', False):
             actual = self.lua.execute((ROOT / 'src/weapon_defaults_store.lua').read_text())
@@ -412,7 +526,7 @@ class CoordinatorSave(unittest.TestCase):
     def advance(self, time, **values):
         self.env['time'] = time
         self.env['pressed'] = False
-        for field in ('save_preset', 'preset_pressed', 'cycle_pressed', 'hud_select_pressed', 'hud_display_pressed', 'grenade_pressed', 'reset_pressed', 'clear_pressed', 'locale_pressed'):
+        for field in ('save_preset', 'preset_pressed', 'cycle_pressed', 'hud_select_pressed', 'hud_display_pressed', 'grenade_pressed', 'reset_pressed', 'clear_pressed'):
             self.env[field] = None
         for name, value in values.items():
             self.env[name] = value
@@ -581,6 +695,28 @@ class CoordinatorSave(unittest.TestCase):
         self.assertEqual(self.state['equips'], 1)
 
 
+    def test_three_choice_presets_select_final_value_once_and_keep_adjacent_cycle(self):
+        self.advance(.2,three_fire=True,slot=0)
+        self.preset(1,right=1);self.preset(2,right=3)
+        self.advance(.3,cycle_pressed=True)
+        self.advance(.5)
+        self.assertEqual((self.env.slot,self.env.directs,self.env.cycles),(2,1,0))
+        self.assertEqual(self.state.actions,1)
+        self.advance(.6,cycle_pressed=True)
+        self.advance(.8)
+        self.assertEqual((self.env.slot,self.env.directs,self.env.cycles),(0,1,1))
+        self.assertEqual(self.state.actions,2)
+
+    def test_direct_failure_or_uncertain_readback_never_falls_back_to_cycles(self):
+        for fault in ('direct_failure','no_transition'):
+            f=CoordinatorSave();f.setUp();f.advance(.2,three_fire=True,slot=0)
+            f.preset(1,right=1);f.preset(2,right=3)
+            f.advance(.3,cycle_pressed=True,**{fault:True})
+            for time in (.5,.7,.9,1.2):f.advance(time)
+            self.assertEqual(f.env.directs,1)
+            self.assertEqual((f.env.slot,f.env.cycles),(0,0))
+            self.assertIn('STOP ','\n'.join(f.env.logs.values()))
+
     def test_real_equip_uses_one_after_cycling_to_two(self):
         self.advance(.2, ammo=True)
         self.preset(1, left=325)
@@ -697,15 +833,20 @@ class HudCoordinator(unittest.TestCase):
         for index, side in enumerate(('right','None','right','None'), 1):
             self.advance(index*.2, held=True, hud_select_pressed=True)
             self.assertEqual(self.env['hud_selection'], side)
-            self.assertEqual(self.env['hud_presented_selection'], side)
+            self.assertEqual(self.env['hud_presented_selection'], 'right')
+            self.assertEqual(self.env['hud_ghost'],side=='None')
         self.assertEqual(self.env['hud_selected_resource'], '361EFAD956A1F180')
         self.assertEqual(self.env['saves'], 0)
         self.assertEqual(self.env['clears'], 0)
         self.assertEqual(self.env['cycles'], 0)
         reads = self.env['hud_reads']
         self.advance(1.3)
-        self.assertEqual(self.env['hud_reads'], reads, 'hidden choice needs no mode/icon reads')
-        self.advance(1.5, hud_select_pressed=True)
+        self.assertGreater(self.env['hud_reads'],reads,'the editor ghost follows the current weapon')
+        self.advance(1.35,held=False)
+        reads=self.env['hud_reads'];self.advance(1.4)
+        self.assertEqual(self.env['hud_reads'],reads,'a hidden HUD outside the editor does not read icons')
+        self.advance(1.45,held=True,hud_select_pressed=True)
+        self.advance(1.5,hud_select_pressed=True)
         self.assertEqual(self.env['hud_selection'], 'right')
 
 
@@ -726,7 +867,7 @@ class HudCoordinator(unittest.TestCase):
         self.advance(.2, pressed=True, down=True)
         self.assertEqual(self.env['hud_moves'], 1)
         self.assertEqual(self.env['hud_finishes'], 1)
-        self.assertTrue(self.env['help_lines'][3].startswith('1.'))
+        self.assertTrue(self.env['help_lines'][1].startswith('1.'))
         self.advance(.3, down=False, preset_pressed=1)
         self.assertEqual(self.env['saves'], 1)
         self.advance(.4, hud_select_pressed=True)
@@ -998,6 +1139,22 @@ class NormalizedSaveIntegration(unittest.TestCase):
 
 
 class ContextHelpIntegration(unittest.TestCase):
+    def test_welcome_only_in_mission_hides_in_menus_and_persists_three_verified_steps(self):
+        f=CoordinatorSave();f.diagnostics=False;f.hud_enabled=True;f.onboarding_enabled=True;f.setUp()
+        self.assertTrue(f.env.intro_visible);self.assertTrue(f.state.first_run)
+        f.advance(.1,menu=True);self.assertFalse(f.env.intro_visible)
+        f.advance(.2,menu=False,ship=True);self.assertFalse(f.env.intro_visible)
+        f.advance(.3,ship=False,held=True,pressed=True,card_label='T',save_label='F8')
+        self.assertTrue(f.env.intro_progress.presets)
+        self.assertIn('[X] OPEN PRESETS: HOLD T + F8 (PRESS)','\n'.join(f.env.intro_lines[i] for i in range(1,len(f.env.intro_lines)+1)))
+        f.advance(.4,hud_select_pressed=True)
+        self.assertTrue(f.env.intro_progress.hud);self.assertTrue(f.env.intro_visible)
+        f.advance(.5,held=False,cycle_assigned=True)
+        self.assertTrue(f.env.intro_progress.swap);self.assertFalse(f.state.first_run)
+        self.assertFalse(f.env.intro_visible)
+        saved=f.env.intro_saves;f.advance(.7);self.assertEqual(f.env.intro_saves,saved)
+        f.lua.globals().shutdown();self.assertEqual(f.env.intro_shutdowns,1)
+
     def test_display_changes_refresh_property_help_without_weapon_actions_and_require_valid_card(self):
         f=self.fixture()
         f.advance(.1,held=True,hud_display_pressed=True)
@@ -1008,7 +1165,7 @@ class ContextHelpIntegration(unittest.TestCase):
             f.advance(.3+index*.01,hud_display_pressed=True)
             self.assertEqual(f.env.hud_display,style)
             self.assertIn('DISPLAY: ICON / TEXT / ICON AND TEXT',self.text(f))
-            active=[run.text for run in f.env.help_lines.runs[5].values() if run.accent]
+            active=[run.text for run in f.env.help_lines.runs[3].values() if run.accent]
             self.assertEqual(active,[label])
             self.assertEqual((f.state.equips,f.env.saves,f.env.clears,f.env.cycles),before)
         f.advance(.34,hud_display_pressed=True,hud_display_failure=True)
@@ -1031,18 +1188,16 @@ class ContextHelpIntegration(unittest.TestCase):
     def text(self,f):
         return '\n'.join(f.env.help_lines[i] for i in range(1,len(f.env.help_lines)+1))
 
-    def test_language_updates_visible_help_in_same_frame_and_closed_card_blocks_it(self):
+    def test_game_language_updates_visible_help_without_a_mod_shortcut(self):
         f=self.fixture()
-        f.lua.globals().Text.register('fr',f.lua.table_from({'help.holding':'MAINTENU: {card}'}))
+        f.lua.globals().Text.register('fr',f.lua.table_from({'help.swap':'RACCOURCI: {trigger}{key}'}))
         f.advance(.1,held=True)
         f.advance(.2,pressed=True)
-        f.advance(.22,locale_pressed=True)
-        self.assertIn('LANGUAGE: ENGLISH',self.text(f))
-        f.advance(.24,locale_pressed=True)
-        self.assertEqual(f.env.help_lines[1],'MAINTENU: R')
-        self.assertIn('LANGUAGE: FR',self.text(f))
-        f.advance(.25,locale_pressed=True,card_open=False)
-        self.assertEqual(f.lua.globals().Text.selected_language(),'fr')
+        self.assertNotIn('CURRENTLY HOLDING:',self.text(f))
+        self.assertNotIn('F9',self.text(f))
+        f.advance(2.1,language='fr')
+        self.assertIn('RACCOURCI: PRESS F8',self.text(f))
+        self.assertEqual(f.lua.globals().Text.language(),'fr')
 
     def test_presets_only_p_press_latches_until_actual_card_release(self):
         f=self.fixture(hud=False)
@@ -1050,8 +1205,8 @@ class ContextHelpIntegration(unittest.TestCase):
         self.assertFalse(f.env.help_visible)
         f.advance(.2,save_held=True,pressed=True,card_label='Mouse5',save_label='F8',cycle_label='Slash')
         self.assertTrue(f.env.help_visible)
-        self.assertIn('CURRENTLY HOLDING: MOUSE5',self.text(f));self.assertNotIn('SAVE PRESETS',self.text(f))
-        self.assertNotIn('F8',self.text(f).splitlines()[0])
+        self.assertNotIn('CURRENTLY HOLDING',self.text(f));self.assertNotIn('SAVE PRESETS',self.text(f))
+        self.assertNotIn('SETTINGS:',self.text(f))
         self.assertIn('CURRENT SWAP HOTKEY: PRESS SLASH',self.text(f))
         self.assertNotIn('3.',self.text(f))
         self.assertEqual(f.env.saves,0)
@@ -1110,6 +1265,46 @@ class ContextHelpIntegration(unittest.TestCase):
         self.assertIn('CURRENT PROPERTY: HIDE',self.text(f))
         self.assertIn('OTHER AVAILABLE PROPERTIES: BURST, 150 M',self.text(f))
 
+    def test_wheel_overlay_tracks_panel_and_hidden_indicator_without_writing_preferences(self):
+        f=self.fixture()
+        f.advance(.2,held=True,pressed=True,save_preset=1,slot=1,wheel_geometry=True)
+        self.assertTrue(any(r.label=='P1' for r in f.env.wheel_marks.values()))
+        self.assertIn('SAVE P1',self.text(f));self.assertNotIn('BURST',self.text(f))
+        f.advance(.3,hud_select_pressed=True,hud_selection='right')
+        self.assertTrue(any(r.label=='HUD' for r in f.env.wheel_marks.values()))
+        self.assertIsNotNone(f.env.indicator)
+        self.assertNotIn('CURRENT PROPERTY',self.text(f));self.assertNotIn('OTHER AVAILABLE',self.text(f))
+        self.assertNotIn('MOVE HUD',self.text(f))
+        f.advance(.4,hud_selection='None')
+        self.assertTrue(f.env.indicator.hidden)
+        self.assertEqual(f.env.hud_selection,'None')
+        reads=f.env.mode_reads;f.advance(.405)
+        self.assertEqual(f.env.mode_reads,reads)
+        f.advance(.6,wheel_geometry_failure=True)
+        self.assertEqual(len(f.env.wheel_marks),0)
+        self.assertTrue(f.env.help_visible)
+        f.advance(.7,held=False)
+        self.assertFalse(f.env.help_visible);self.assertIsNone(f.env.indicator)
+        self.assertEqual((f.env.saves,f.env.cycles),(1,0))
+
+    def test_property_panel_reads_current_icon_and_hides_native_failure_until_bounded_retry(self):
+        f=self.fixture()
+        f.advance(.2,held=True,hud_select_pressed=True,hud_selection='right',property_icons=True,slot=0)
+        def icon():
+            return next(r for r in f.env.help_lines.runs[1].values() if r.kind=='icon')
+        self.assertTrue(f.env.help_visible)
+        self.assertEqual(icon().hash,'3efff09cd12fb89a')
+        f.advance(.4,slot=1)
+        self.assertEqual(icon().hash,'131742904d846798')
+        f.advance(.6,property_icon_failure=True)
+        self.assertFalse(f.env.help_visible)
+        f.advance(.65,property_icon_failure=False)
+        self.assertFalse(f.env.help_visible)
+        f.advance(.71)
+        self.assertTrue(f.env.help_visible)
+        self.assertEqual(icon().hash,'131742904d846798')
+        self.assertEqual((f.env.saves,f.env.cycles),(0,0))
+
 
     def test_failed_help_renderer_does_not_stop_saving(self):
         f=self.fixture()
@@ -1133,7 +1328,7 @@ class ContextHelpIntegration(unittest.TestCase):
         f.advance(.2,held=True,save_preset=1,slot=0)
         f.advance(.4,slot=1,save_held=True,pressed=True)
         self.assertTrue(f.env.help_has_icons)
-        runs=f.env.help_lines.runs[3]
+        runs=f.env.help_lines.runs[1]
         icons=[run for _,run in runs.items() if run.kind=='icon']
         self.assertEqual(len(icons),1)
         self.assertEqual(icons[0].hash,'3efff09cd12fb89a')
@@ -1227,7 +1422,7 @@ class CoordinatorSecondaryFire(unittest.TestCase):
             f=self.legacy(diagnostics=diagnostics)
             f.advance(.2,held=True,save_held=True,pressed=True)
             self.assertTrue(f.env.help_visible)
-            self.assertNotIn('UNAVAILABLE',f.env.help_lines[3])
+            self.assertNotIn('UNAVAILABLE',f.env.help_lines[1])
             f.advance(.3,held=False,save_held=False,cycle_pressed=True)
             for t in (.5,.7,.9): f.advance(t)
             self.assertEqual(list(f.env.actions.values()),[3])
@@ -1238,13 +1433,14 @@ class CoordinatorSecondaryFire(unittest.TestCase):
             self.assertEqual(f.state.equips,1)
             self.assertNotIn('STOP ',''.join(f.env.files.values()))
 
-    def test_legacy_multiple_choices_verify_return_then_cycle_with_separate_budget(self):
+    def test_legacy_multiple_choices_verify_return_then_select_with_separate_budget(self):
         for reverse in (False,True):
             f=self.legacy(single=False,reverse=reverse)
             f.advance(.2,cycle_pressed=True)
             self.assertEqual((f.env.secondary_slot,f.env.slot),(0,2))
             for t in (.4,.6,.8,1.0): f.advance(t)
-            self.assertEqual(list(f.env.actions.values()),[3,3,3])
+            self.assertEqual(list(f.env.actions.values()),[3,3])
+            self.assertEqual(f.env.directs,1)
             self.assertEqual((f.env.secondary_slot,f.env.slot),(0,1))
             self.assertIsNone(f.store.targets.right if reverse else f.store.targets.left)
             self.assertNotIn('STOP ',''.join(f.env.files.values()))
@@ -1349,6 +1545,75 @@ class ResetCoordinatorTests(unittest.TestCase):
         self.assertEqual(f.env.hud_shutdowns, 1)
         self.assertFalse(f.env.help_visible)
         self.assertTrue(f.env.reset_defaults)
+
+
+class NativeEventRuntime(unittest.TestCase):
+    def fixture(self,hud=True):
+        f=CoordinatorSave();f.diagnostics=False;f.hud_enabled=hud;f.setUp();return f
+
+    def test_quiet_gameplay_does_not_read_equipment_flashlight_or_mode_values(self):
+        f=self.fixture();f.advance(.02,eid=11,flashlight=True,light_value=2)
+        f.advance(.2);f.advance(.4)
+        names=('active_reads','light_reads','mode_reads','hud_reads')
+        before=[f.env[name] for name in names]
+        for time in (1,2.1,10):f.advance(time)
+        self.assertEqual([f.env[name] for name in names],before)
+
+    def test_intermediate_main_weapon_is_seen_inside_one_lua_frame(self):
+        f=self.fixture(False);f.prepare_manual_ammo_override();equips=f.state.equips
+        for eid,main in ((0,False),(10,True)):
+            f.env.native_push(f.lua.table_from(dict(kind=1,observed=True,main=main,empty=eid==0,flags=1,
+                eid=eid,avatar_bytes='A'*24,weapon_bytes=chr(eid)*24,
+                slots=f.lua.table_from([10,11,0]),selection_bytes=chr(eid)+'\0'*7)))
+        f.advance(.65);self.assertEqual(f.state.equips,equips)
+        for eid in (11,10):
+            f.env.native_push(f.lua.table_from(dict(kind=1,observed=True,main=True,empty=False,flags=1,
+                eid=eid,avatar_bytes='A'*24,weapon_bytes=chr(eid)*24,
+                slots=f.lua.table_from([10,11,0]),selection_bytes=chr(eid)+'\0'*7)))
+        f.advance(.7);f.advance(.9);f.advance(1.1)
+        self.assertEqual(f.state.equips,equips+1);self.assertEqual(f.env.ammo_slot,1)
+
+    def test_confirmed_manual_light_change_survives_an_immediate_weapon_swap(self):
+        f=self.fixture(False);f.advance(.02,eid=11,flashlight=True,light_value=2);f.advance(.2)
+        f.env.native_push(f.lua.table_from(dict(kind=3,action=5,changed=True,own=False,flags=17,
+            eid=11,light=1,module_bytes='L'*24,avatar_bytes='A'*24,weapon_bytes=chr(11)*24)))
+        f.advance(.3,eid=12,light_value=0);f.advance(.5);f.advance(.7)
+        self.assertEqual(f.env.global_light,1);self.assertEqual(f.env.light_value,1)
+
+    def test_late_replicated_mode_invalidates_indicator_without_synthesizing_equip(self):
+        f=self.fixture();f.advance(.02);f.advance(.2);f.advance(.4)
+        f.env.events_only=True;reads=f.env.hud_reads;equips=f.state.equips
+        f.advance(2,slot=0)
+        self.assertEqual(f.env.hud_reads,reads,'no notification means no recurring mode read')
+        f.env.native_push(f.lua.table_from(dict(kind=4,action=0,eid=f.env.eid,flags=33,replicated=True)))
+        f.advance(2.1)
+        self.assertGreater(f.env.hud_reads,reads);self.assertEqual(f.state.equips,equips)
+        reads=f.env.hud_reads;f.advance(3)
+        self.assertEqual(f.env.hud_reads,reads,'received state must not start indefinite polling')
+
+    def test_failed_event_refresh_never_renders_old_mode_after_retry_deadline(self):
+        f=self.fixture();f.advance(.02);f.advance(.2);f.advance(.4)
+        f.env.events_only=True
+        f.env.native_push(f.lua.table_from(dict(kind=4,action=3,eid=f.env.eid,flags=0)))
+        renders=f.env.hud_renders
+        for time in (1,1.2,1.6,3):f.advance(time,mode_failure=True)
+        self.assertEqual(f.env.hud_renders,renders,'a failed event refresh resurrected cached presentation')
+
+    def test_late_avatar_commit_survives_old_avatar_removal_and_delayed_readiness(self):
+        f=self.fixture();f.advance(.1);equips=f.state.equips;f.env.events_only=True
+        f.env.native_push(f.lua.table_from(dict(kind=7,changed=True,flags=17,holder=310)))
+        f.env.native_push(f.lua.table_from(dict(kind=6,flags=1,avatar_bytes='A'*24)))
+        f.advance(.2,reader_failure='local avatar unavailable')
+        f.env.reader_failure=None;f.env.avatar='B'
+        f.advance(1.5)
+        self.assertEqual(f.state.equips,equips+1)
+
+    def test_unresolved_event_has_a_deadline_and_queue_loss_stops_actions(self):
+        f=self.fixture();f.advance(.2,eid=12,not_ready=True);f.advance(1.0)
+        reads=f.env.active_reads;f.advance(2);f.advance(10)
+        self.assertEqual(f.env.active_reads,reads)
+        f.env.event_failure=True;f.lua.globals().update()
+        self.assertEqual(f.state.status,'stopped');self.assertEqual(f.env.event_shutdowns,1)
 
 
 if __name__ == '__main__':

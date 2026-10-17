@@ -58,7 +58,15 @@ function M.register(config)
                 state.selected=selected
                 local ok,result=pcall(factory,selected)
                 if ok then state.runtime=result;state.status="started"
-                else state.status="failed";state.invalid=tostring(result);report(state.invalid) end
+                else
+                    state.status="failed";state.invalid=tostring(result)
+                    local runtime=rawget(_G,"ConstantinWeaponModesTrial")
+                    if type(runtime)=="table" and rawget(runtime,"version")==state.version and
+                       type(rawget(runtime,"stop_native_events"))=="function" then
+                        pcall(runtime.stop_native_events)
+                    end
+                    report(state.invalid)
+                end
             end
             -- Preserve the preceding callback's full tuple, including nils.
             return ...

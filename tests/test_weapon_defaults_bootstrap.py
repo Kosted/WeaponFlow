@@ -119,9 +119,12 @@ class BootstrapTests(unittest.TestCase):
 
     def test_factory_failure_is_not_retried_or_allowed_to_change_previous_return(self):
         state = self.register()
+        self.lua.execute('''ConstantinWeaponModesTrial={version='1.9.8',stop_native_events=function()
+            env.observer_stops=(env.observer_stops or 0)+1;return true end}''')
         self.env.factory_failure = True
         self.assertEqual(self.update(9), (9, None, "tail"))
         self.assertEqual(state.status, "failed")
+        self.assertEqual(self.env.observer_stops,1)
         self.env.factory_failure = False
         self.update()
         self.assertEqual(self.env.initializations, 1)

@@ -6,6 +6,7 @@ belongs to BSL's external build_addon, not these packaging fixtures.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -49,6 +50,13 @@ class ReleaseBuilderTests(unittest.TestCase):
         for label, filename in BUILD.COMPONENTS:
             (self.root / "src" / filename).parent.mkdir(parents=True,exist_ok=True)
             (self.root / "src" / filename).write_text(f'return {{component="{label}"}}\n', encoding="utf-8")
+        for name in BUILD.NATIVE_SOURCES:
+            target=self.root/'native'/name;target.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(ROOT/'native'/name,target)
+        shutil.copyfile(ROOT/'build_native_events.py',self.root/'build_native_events.py')
+        image=b'MZ'+b'\0'*1024
+        payload=f'return {{abi=1,sha256="{hashlib.sha256(image).hexdigest()}",source_sha256="{BUILD.source_digest(self.root/"native")}",hex="{image.hex()}"}}\n'
+        (self.root/'src/native_weapon_events_payload.lua').write_text(payload,encoding='utf-8')
         shutil.copyfile(ROOT / "src/weapon_defaults_bootstrap.lua", self.root / "src/weapon_defaults_bootstrap.lua")
         shutil.copyfile(ROOT / "src" / BUILD.DIAGNOSTICS_SOURCE, self.root / "src" / BUILD.DIAGNOSTICS_SOURCE)
         (self.root / "src/native_weapon_defaults.lua").write_text(
@@ -86,6 +94,23 @@ class ReleaseBuilderTests(unittest.TestCase):
             *(folder + "/" + BUILD.ARCHIVE + suffix
               for _, folder, _, _, _ in BUILD.PAYLOAD_OPTIONS for suffix in ("", ".stream", ".gpu_resources")),
         })
+
+    def test_stale_or_corrupt_native_image_stops_before_encoding(self):
+        payload=self.root/'src/native_weapon_events_payload.lua'
+        original=payload.read_bytes()
+        for path in (payload,self.root/'native/weaponflow_events.c'):
+            before=path.read_bytes()
+            with self.subTest(path=path.name):
+                path.write_bytes(before+b'\ncorruption')
+                if path==payload:
+                    path.write_text(original.decode().replace('4d5a','4c5a',1),encoding='utf-8')
+                encoded=[]
+                with self.assertRaisesRegex(ValueError,'stale'):
+                    BUILD.build_distribution(self.root/'unused',root=self.root,flavor='release',
+                        builder=lambda *args:encoded.append(args))
+                self.assertEqual(encoded,[])
+                self.assertFalse((self.root/'dist'/BUILD.output_name('release',BUILD.VERSION)).exists())
+            path.write_bytes(before)
 
     def test_single_arsenal_option_encodes_and_deploys_one_resource(self):
         encoded = []

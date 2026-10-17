@@ -16,7 +16,29 @@ function Controller:log(event,detail)
 end
 function Controller:equip(identity,sequence,time)
     self.current={identity=identity,sequence=sequence,deadline=time+8,ready=time+0.10,
-        restoring=true,attempts=0,next_read=0,next_load=0}
+        restoring=true,dirty=true,read_deadline=time+8,attempts=0,next_read=0,next_load=0}
+end
+function Controller:notify(identity,time)
+    local current=self.current
+    if not current or current.identity~=identity or current.blocked then return end
+    current.dirty=true;current.next_read=0;current.read_deadline=time+0.50
+end
+function Controller:observed_change(identity,value,module_bytes,time)
+    -- The observer copied a confirmed manual transition while the weapon was
+    -- actually held. It may already have been swapped away before Lua runs.
+    if not valid(value) or type(module_bytes)~="string" or #module_bytes~=24 then return false end
+    if self.current and self.current.identity==identity and self.current.blocked then return false end
+    self.pending=value
+    local current=self.current
+    if current then
+        current.restoring=false
+        if current.identity==identity then
+            current.seen=value;current.module=module_bytes;current.awaiting=nil
+            current.dirty=false;current.sample=nil
+        end
+        if current.loaded then self:persist(current,time) end
+    end
+    return true
 end
 function Controller:reset(discard_pending)
     self.current=nil
@@ -59,6 +81,13 @@ end
 function Controller:step(snapshot,identity,time,can_apply)
     local current=self.current
     if not current or current.identity~=identity or current.blocked then return end
+    if current.loaded then self:persist(current,time) end
+    -- A completed observation stays idle until a native notification. Only
+    -- initialization/restoration and issued readbacks have bounded retries.
+    if current.loaded and not current.dirty and not current.restoring and not current.awaiting then return end
+    if time>current.read_deadline and not current.awaiting then
+        current.dirty=false;current.restoring=false;return
+    end
     if not current.loaded then
         if time<current.next_load then return end
         current.next_load=time+0.25
@@ -81,7 +110,8 @@ function Controller:step(snapshot,identity,time,can_apply)
         return
     end
     if type(observed)=="table" and observed.present==false then
-        current.sample=nil;current.next_read=time+1
+        current.sample=nil;current.dirty=false;current.restoring=false
+        self:log("LIGHT_SKIP","equip="..current.sequence.." reason=no flashlight attachment")
         if current.awaiting then
             current.blocked=true;current.restoring=false
             self:log("LIGHT_STOP","equip="..current.sequence.." reason=module disappeared during action")
@@ -96,7 +126,7 @@ function Controller:step(snapshot,identity,time,can_apply)
         self:unreadable_action(current,time)
         self:persist(current,time);return
     end
-    current.sample=observed;current.next_read=time;current.problem=nil
+    current.sample=observed;current.next_read=time+0.06;current.problem=nil;current.dirty=false
     local value=observed.selected
     if current.module and current.module~=observed.module_bytes then
         -- A new attachment's initial mode is not a manual change of the old
@@ -111,6 +141,7 @@ function Controller:step(snapshot,identity,time,can_apply)
     current.module=observed.module_bytes
     if current.seen==nil then
         current.seen=value
+        self:log("LIGHT_STATE","equip="..current.sequence.." mode="..value.." target="..tostring(current.target))
         if current.target==nil and self.pending==nil then
             -- First reliable mode establishes a neutral starting preference.
             -- Legacy per-weapon presets are deliberately not used to guess it.
@@ -127,12 +158,14 @@ function Controller:step(snapshot,identity,time,can_apply)
             self:log("LIGHT_STOP","equip="..current.sequence.." reason=no verified transition; no repeat")
             return
         else
-            -- A third value cannot be the single issued cycle's result.
-            -- Preserve the newly observed choice and stop the restoration.
-            current.awaiting=nil;current.restoring=false;current.seen=value;self.pending=value
+            -- Manual changes are learned only from the observer's confirmed
+            -- cycle event. An unrelated setter/late initialization is not one.
+            current.awaiting=nil;current.restoring=false;current.blocked=true
+            self:log("LIGHT_STOP","equip="..current.sequence.." reason=unexpected action result; no repeat or inferred preference")
+            return
         end
     elseif value~=current.seen then
-        current.seen=value;self.pending=value;current.restoring=false
+        current.seen=value
     end
     self:persist(current,time)
     if self.pending~=nil or not current.restoring then return end

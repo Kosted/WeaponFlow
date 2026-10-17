@@ -16,7 +16,7 @@ class Fixture:
         load_text(self.lua)
         self.module = self.lua.execute(SOURCE)
         self.env = self.lua.execute("""
-          local e={worlds={'a'},units={a=100,b=200},rw=1920,rh=1080,created={},destroyed={},rects={},
+          local e={worlds={'scene','a'},units={scene=100000,a=100,b=200},rw=1920,rh=1080,created={},destroyed={},rects={},
             logs={},finish_calls=0,move_calls=0,bounds_calls=0,resolution_calls=0,cycle_calls=0,x=465,y=64}
           local function present(world)
             for _,w in ipairs(e.worlds) do if w==world then return true end end
@@ -48,12 +48,13 @@ class Fixture:
                 assert(select('#',...)==4,'observed rect API takes GUI,position,size,color')
                 local gui,position,size,color=...
                 assert(gui and present(gui.world),'rect on stale GUI')
-                assert(position.vector and size.vector and color.color,'wrong API argument type/order')
+                assert(position.vector and position.z==1022 and size.vector and color.color,'wrong API argument type/order')
                 e.rects[#e.rects+1]={gui=gui.id,world=gui.world,x=position.x,y=position.y,
                   w=size.x,h=size.y,alpha=color.alpha,r=color.r,g=color.g,b=color.b}
               end,
             },
             Vector2=function(x,y) return {vector=true,x=x,y=y} end,
+            Vector3=function(x,y,z) return {vector=true,x=x,y=y,z=z} end,
             Color=function(alpha,r,g,b) return {color=true,alpha=alpha,r=r,g=g,b=b} end,
           }
           e.layout={
@@ -92,9 +93,10 @@ class Fixture:
           e.log=function(message) e.logs[#e.logs+1]=message end
           return e
         """)
+        font=self.lua.execute(FONT_SOURCE)
         self.options = self.lua.table_from({
             "api": self.env.api, "layout": self.env.layout, "icons": self.env.icons, "log": self.env.log,
-            "font": self.lua.execute(FONT_SOURCE),
+            "font": font.heading or font,
             "display": display,
         })
         self.hud = self.module.new(self.options)
@@ -126,6 +128,52 @@ class Fixture:
 
 
 class HudRenderTests(unittest.TestCase):
+
+    def test_actual_displayed_mode_change_flashes_gold_briefly_without_flashing_on_equip_or_editing(self):
+        f=Fixture();modes,native=f.state(kind='rpm',value=850,side='right')
+        def show(value,time,identity='same-instance'):
+            modes['directions']['right']['current']=value;native['directions']['right']['current']=value
+            f.hud.set(f.hud,f.table(modes),f.table(native),'right',time,identity)
+            f.env.rects=f.lua.table();f.render(time)
+            return any((r.r,r.g,r.b)==(255,215,65) for r in f.env.rects.values())
+        self.assertFalse(show(850,0))
+        self.assertTrue(show(1150,.1))
+        self.assertFalse(show(1150,.4))
+        self.assertFalse(show(700,.5,'other-instance'))
+        f.hud.edit(f.hud,True,False,'H')
+        self.assertFalse(show(850,.6,'other-instance'))
+        f.hud.hide(f.hud)
+        self.assertFalse(show(1150,.8,'other-instance'))
+
+    def test_editor_ghost_uses_actual_icon_at_saved_position_without_changing_selection(self):
+        f=Fixture();f.set(kind='rpm',value=850,side='right');f.render(0)
+        normal=max(r.alpha for r in f.env.rects.values())
+        f.env.selection='None';f.env.rects=f.lua.table()
+        f.hud.edit(f.hud,True,True,'Mouse5');f.render(.2)
+        self.assertLess(max(r.alpha for r in f.env.rects.values()),normal)
+        bounds=f.hud.editor_bounds(f.hud)
+        self.assertEqual((bounds.x,bounds.y,bounds.hidden,bounds.key),(465,64,True,'MOUSE5'))
+        self.assertEqual(f.env.selection,'None')
+        self.assertFalse(f.hud.edit(f.hud,True,None,'Mouse5'),'a held editor does not force native re-reading every frame')
+        f.hud.edit(f.hud,False,None,None)
+        self.assertIsNone(f.hud.editor_bounds(f.hud))
+        self.assertEqual((f.env.move_calls,f.env.cycle_calls),(0,0))
+
+    def test_both_renderers_require_world2_and_do_not_fall_back_to_scene(self):
+        from test_weapon_defaults_help_hud import Fixture as HelpFixture
+        for make in (Fixture, HelpFixture):
+            with self.subTest(renderer=make.__module__):
+                f=make()
+                if isinstance(f,Fixture):f.set()
+                else:f.set(['SAFE'])
+                self.assertTrue(f.render(0))
+                self.assertEqual(f.hud.owner,'a')
+                f.env.worlds=f.lua.table_from(['scene'])
+                outcome=f.render(.6)
+                self.assertIsNone(outcome[0])
+                self.assertIsNone(f.hud.gui)
+                self.assertEqual(len(f.env.created),1)
+                self.assertEqual(len(f.env.destroyed),0)
 
     def test_same_renderer_switches_style_immediately_and_preserves_style_on_save_failure(self):
         f=Fixture()

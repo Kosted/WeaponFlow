@@ -5,13 +5,16 @@ local Store=DefaultsStore
 local MAX_BYTES=4096
 local NAMES={"save","cycle","hud","reset"}
 local KNOWN={save=true,cycle=true,hud=true,reset=true}
+local INTRO={presets=true,hud=true,swap=true}
+local INTRO_FIELDS={"intro_presets","intro_hud","intro_swap","first_run"}
 -- Accept retired markers on read; omit them on the next own-file mutation.
-local RETIRED={clear=true,export=true,import=true,locale=true}
+local RETIRED={clear=true,export=true,import=true,locale=true,language=true}
 local State={}
 State.__index=State
 
 local function empty()
-    return {save=false,cycle=false,hud=false,reset=false}
+    return {save=false,cycle=false,hud=false,reset=false,
+        intro_presets=false,intro_hud=false,intro_swap=false,first_run=true}
 end
 
 local function parse(raw,profile)
@@ -27,7 +30,7 @@ local function parse(raw,profile)
             else
                 local key,value=line:match("^([a-z_]+)%s*=%s*(.-)%s*$")
                 if not section or not key or fields[key]~=nil or
-                   (not KNOWN[key] and not RETIRED[key] and key~="schema" and key~="profile_id" and key~="reset_hotkey" and key~="fresh_start" and key~="bind" and key~="language") then
+                   (not KNOWN[key] and not RETIRED[key] and not (key:sub(1,6)=="intro_" and INTRO[key:sub(7)]) and key~="first_run" and key~="schema" and key~="profile_id" and key~="reset_hotkey" and key~="fresh_start" and key~="bind") then
                     return nil,"invalid or duplicate menu marker field/section"
                 end
                 fields[key]=value
@@ -37,15 +40,22 @@ local function parse(raw,profile)
     if fields.schema~="1" then return nil,"unsupported menu marker schema" end
     if fields.profile_id~=profile then return nil,"menu marker profile ID mismatch" end
     local result={}
-    if fields.language~=nil then
-        if #fields.language>32 or not fields.language:match("^[%a][%w%-]*$") then return nil,"invalid menu language" end
-        result._language=fields.language:lower()
-    end
     for _,name in ipairs(NAMES) do
         if fields[name]~="true" and fields[name]~="false" and fields[name]~="pending" then
             return nil,"invalid or missing menu marker: "..name
         end
         result[name]=fields[name]=="pending" and "pending" or fields[name]=="true"
+    end
+    for name in pairs(INTRO) do
+        local field="intro_"..name
+        if fields[field]~=nil and fields[field]~="true" and fields[field]~="false" then
+            return nil,"invalid onboarding field: "..field
+        end
+        result[field]=fields[field]=="true"
+    end
+    result.first_run=not (result.intro_presets and result.intro_hud and result.intro_swap)
+    if fields.first_run~=nil and fields.first_run~=tostring(result.first_run) then
+        return nil,"invalid onboarding completion state"
     end
     return result
 end
@@ -53,7 +63,7 @@ end
 local function serialize(profile,values)
     local lines={"[menu]","schema=1","profile_id="..profile}
     for _,name in ipairs(NAMES) do lines[#lines+1]=name.."="..tostring(values[name]) end
-    if values._language then lines[#lines+1]="language="..values._language end
+    for _,name in ipairs(INTRO_FIELDS) do lines[#lines+1]=name.."="..tostring(values[name]) end
     lines[#lines+1]=""
     return table.concat(lines,"\r\n")
 end
@@ -77,27 +87,6 @@ function State:contains(name)
     -- A process ending during publication must never replay an uncertain
     -- native mutation at the next startup.
     return values[name]~=false
-end
-function State:language()
-    local values,why=self:_read()
-    if not values then return nil,why end
-    return values._language or "auto"
-end
-function State:set_language(language,before_write)
-    if type(language)~="string" or #language>32 or not language:match("^[%a][%w%-]*$") then
-        return nil,"invalid menu language"
-    end
-    local values,raw=self:_read()
-    if not values then return nil,raw end
-    language=language:lower()
-    if (values._language or "auto")==language then return true,false end
-    if type(before_write)~="function" then return nil,"language publication guard required" end
-    local safe,allowed,why=pcall(before_write)
-    if not safe or allowed~=true then return nil,safe and why or allowed end
-    values._language=language
-    local ok,written,reason=pcall(self.io.atomic_write,self.path,serialize(self.profile_id,values),raw)
-    if not ok or written~=true then return nil,"menu language write failed: "..tostring(ok and reason or written) end
-    return true,true
 end
 
 function State:ensure_file()
@@ -143,6 +132,25 @@ end
 -- when it positively reports that no native write was attempted.
 function State:begin(name) return pending(self,name,false) end
 function State:cancel(name) return pending(self,name,true) end
+
+function State:onboarding()
+    local values,why=self:_read()
+    if not values then return nil,why end
+    return {first_run=values.first_run,presets=values.intro_presets,hud=values.intro_hud,swap=values.intro_swap}
+end
+
+function State:complete_step(name)
+    if not INTRO[name] then return nil,"unknown onboarding step" end
+    local values,raw=self:_read()
+    if not values then return nil,raw end
+    if not values["intro_"..name] then
+        values["intro_"..name]=true
+        values.first_run=not (values.intro_presets and values.intro_hud and values.intro_swap)
+        local ok,written,why=pcall(self.io.atomic_write,self.path,serialize(self.profile_id,values),raw)
+        if not ok or written~=true then return nil,"onboarding write failed: "..tostring(ok and why or written) end
+    end
+    return {first_run=values.first_run,presets=values.intro_presets,hud=values.intro_hud,swap=values.intro_swap}
+end
 
 function M.open(profile_id,options)
     if type(Store)~="table" or type(Store.context)~="function" then

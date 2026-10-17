@@ -197,14 +197,15 @@ local function native_io(expected_game)
     local function bind(name,declaration)
         local ok,value=pcall(function()return kernel[name]end)
         if not ok then ffi.cdef(declaration);value=kernel[name] end
-        return value
+        local result,args=declaration:match("^(.-)"..name.."(%b());$")
+        check(result and args,"invalid local Windows API declaration")
+        return ffi.cast(result.." (__stdcall *)"..args,value)
     end
     local process=bind("GetCurrentProcess","void *GetCurrentProcess(void);")()
     local module=bind("GetModuleHandleA","void *GetModuleHandleA(const char *);")
     check(tonumber(ffi.cast("uintptr_t",module("game.dll")))==expected_game,
         "binding mutation requires this process's verified game.dll")
     local write=bind("WriteProcessMemory","int WriteProcessMemory(void *,void *,const void *,size_t,size_t *);")
-    write=ffi.cast("int (*)(void *,void *,const void *,size_t,size_t *)",write)
     local written=ffi.new("size_t[1]")
     return function(address,bytes)
         written[0]=0

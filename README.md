@@ -1,5 +1,7 @@
 # WeaponFlow
 
+Current version: **2.1.5** · [Changelog](release/CHANGELOG.md#215)
+
 ![WeaponFlow — Presets & HUD](release/media/weaponflow-banner-v2.png)
 
 **Your weapon settings when you equip. One button to switch them in combat.**
@@ -18,8 +20,9 @@ Switch to another preset while aiming in first or third person, or even firing.
 ## Quick start
 
 Import a built WeaponFlow ZIP into HD2 Arsenal and enable **WeaponFlow** with
-**[Bingus Shared Loader v17](https://github.com/CowboyBingus/BingusSharedLoader/releases/tag/v17)**
-and **[Mod Bindings Menu v2.1](https://www.nexusmods.com/helldivers2/mods/16478)**.
+**[Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader/releases/latest)**
+and **[Mod Bindings Menu v2.1 or v2.2](https://www.nexusmods.com/helldivers2/mods/16478)**.
+With MBM v2.2, use Shared Loader v18 or newer.
 
 **R means your weapon-menu button.** Use your actual binding if you changed it;
 wait for the weapon menu to open and keep holding the button.
@@ -43,6 +46,8 @@ included and can be replaced or cleared.
 
 Requires Python 3.10+ and a separate checkout of Bingus Shared Loader with
 `scripts/build_addon.py` and `scripts/archive.py`.
+The bundled native observer is checked against its source when packaging.
+Native C changes also require Zig 0.13.0; Lua-only builds reuse the embedded image.
 
 ```powershell
 python build_weapon_modes_release.py --bsl-source 'C:\path\to\BingusSharedLoader' --flavor release
@@ -55,10 +60,12 @@ See [build instructions](release/BUILD.md) for details.
 ## Source layout
 
 - `src/` — runtime Lua, native readers, presets, controls, HUD and embedded assets.
+- `native/` — game notification observer source.
 - `src/locales/` — translations and [localization guide](src/locales/README.md).
 - `tests/` — regression checks with isolated game-data fixtures.
 - `release/` — player documentation, changelog, asset notices and font licenses.
 - `build_weapon_modes_release.py` — Arsenal package builder.
+- `build_native_events.py` — native observer builder.
 - `generate_network_field_aliases.py` — offline Stingray field-hash helper.
 
 For development checks:
@@ -75,7 +82,7 @@ See [test notes](tests/README.md).
 
 CowboyBingus — Bingus Shared Loader and Mod Bindings Menu.
 DDRK1NG — HUD rendering inspiration. Filediver — resource extraction.
-Liberation Fonts and Noto — HUD fonts.
+Exo 2, Liberation Fonts and Noto — HUD fonts.
 
 Game icons and strings belong to the Helldivers 2 rights holders.
 [Third-party notices](release/THIRD-PARTY-NOTICES.md) and both font licenses

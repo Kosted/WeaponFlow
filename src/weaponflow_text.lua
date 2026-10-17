@@ -2,14 +2,13 @@
 -- never writes that registry, settings, bindings or weapon data.
 local M={generation=0}
 local english=EnglishText.strings
-local override="auto"
 local font
 local language_provider,observed
 local cache,stamp={},nil
 local bundled={}
 local acceptable
 local catalog_revision,inventory_stamp=0,nil
-local inventory_languages,inventory_known
+local inventory_known
 
 -- Strict UTF-8, including overlong/surrogate/out-of-range rejection. Offsets
 -- remain byte offsets so existing key highlight ranges stay unambiguous.
@@ -52,17 +51,10 @@ local function tag(value)
     if type(value)~="string" or #value>32 or not value:match("^[%a][%w%-]*$") then return nil end
     return value:lower()
 end
-function M.set_language(value)
-    value=tag(value or "auto")
-    if not value then return nil,"invalid language tag" end
-    override=value;stamp=nil
-    return true
-end
 function M.configure(options)
     options=options or {}
     if options.font then font=options.font;stamp=nil end
     if options.language_provider then language_provider=options.language_provider end
-    if options.language then return M.set_language(options.language) end
     return true
 end
 function M.read_language()
@@ -70,13 +62,13 @@ function M.read_language()
     local ok,value=pcall(language_provider)
     observed=ok and type(value)=="table" and tag(value.tag) or nil
 end
-function M.available_languages()
+local function known_languages()
     local registry=rawget(_G,"BingusTranslations")
     local identity=tostring(registry)..":"..tostring(type(registry)=="table" and registry.serial or 0)..":"..catalog_revision
-    if inventory_stamp==identity then return inventory_languages,inventory_known end
+    if inventory_stamp==identity then return inventory_known end
     local known={en=true}
     for language in pairs(bundled) do known[language]=true end
-    for _,pack in ipairs(type(registry)=="table" and registry.packs or {}) do
+    for _,pack in ipairs(type(registry)=="table" and type(registry.packs)=="table" and registry.packs or {}) do
         local language=type(pack)=="table" and tag(pack.language)
         local strings=type(pack)=="table" and type(pack.mods)=="table" and pack.mods.weaponflow
         if language and type(strings)=="table" then
@@ -85,27 +77,14 @@ function M.available_languages()
             end
         end
     end
-    local rest={}
-    for language in pairs(known) do if language~="en" and language~="auto" then rest[#rest+1]=language end end
-    table.sort(rest)
-    local languages={"auto","en"}
-    for _,language in ipairs(rest) do languages[#languages+1]=language end
-    inventory_stamp,inventory_languages,inventory_known=identity,languages,known
-    return languages,known
-end
-function M.selected_language() return override end
-function M.next_language()
-    local languages=M.available_languages()
-    for index,language in ipairs(languages) do
-        if language==override then return languages[index%#languages+1] end
-    end
-    return "auto"
+    inventory_stamp,inventory_known=identity,known
+    return known
 end
 function M.language()
     local registry=rawget(_G,"BingusTranslations")
     local automatic=language_provider and observed or (not language_provider and type(registry)=="table" and tag(registry.game_language))
-    local selected=override~="auto" and override or automatic or "en"
-    local _,known=M.available_languages()
+    local selected=automatic or "en"
+    local known=known_languages()
     if known[selected] then return selected end
     local base=selected:match("^([^-]+)")
     return base and known[base] and base or "en"
@@ -152,7 +131,7 @@ local function template(key,source)
         local own=bundled[wanted]
         local candidate=own and own[key]
         if candidate and acceptable(candidate,source) then text=candidate end
-        for _,pack in ipairs(type(registry)=="table" and registry.packs or {}) do
+        for _,pack in ipairs(type(registry)=="table" and type(registry.packs)=="table" and registry.packs or {}) do
             if type(pack)=="table" and tag(pack.language)==wanted and type(pack.mods)=="table" then
                 local translations=pack.mods.weaponflow
                 candidate=type(translations)=="table" and translations[key]
@@ -184,6 +163,18 @@ function M.hud(key,values)
     -- This has no effect on gameplay or command availability.
     if not M.supports(text) then text=M.upper(format(english[key],values)) end
     return text
+end
+function M.trigger(value)
+    if value==nil then return M.hud("trigger.Press") end
+    if not M.valid(value,64) then return nil end
+    local labels={}
+    for name in value:gmatch("[^/]+") do
+        name=name:match("^%s*(.-)%s*$")
+        local label=M.has("trigger."..name) and M.hud("trigger."..name) or M.clean(name,64)
+        if not label then return nil end
+        labels[#labels+1]=label
+    end
+    return #labels>0 and table.concat(labels," / ") or nil
 end
 function M.native(key,source)
     if not source then return nil end

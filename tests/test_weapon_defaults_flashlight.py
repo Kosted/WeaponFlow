@@ -57,11 +57,21 @@ class Fixture:
         self.controller.equip(self.controller, identity, sequence, time)
 
     def step(self, time, can_apply=True, identity=None):
+        # Changes are notifications from the synthetic engine, not a poll in
+        # the production controller. Quiet fixture steps produce no event.
+        signature=tuple(self.env[name] for name in ('selected','present','module_bytes','read_error','partial_read_error','observation_override'))
+        if getattr(self,'event_signature',None) is not None and self.event_signature!=signature:
+            self.controller.notify(self.controller,self.identity,time)
+        self.event_signature=signature
         self.controller.step(self.controller, self.env.snapshot,
                              self.identity if identity is None else identity, time, can_apply)
 
     def pause(self):
         self.controller.pause(self.controller)
+
+    def manual(self,value,time):
+        self.env.selected=value
+        self.controller.observed_change(self.controller,self.identity,value,self.env.module_bytes,time)
 
     def reset(self, discard_pending=False):
         self.controller.reset(self.controller, discard_pending)
@@ -89,10 +99,10 @@ class FlashlightControllerTests(unittest.TestCase):
     def test_manual_observed_changes_replace_global_preference_once(self):
         fixture = Fixture(stored=2, selected=2)
         fixture.step(0)
-        fixture.env.selected = 0
+        fixture.manual(0,0.2)
         fixture.step(0.2)
         fixture.step(0.3)
-        fixture.env.selected = 1
+        fixture.manual(1,0.5)
         fixture.step(0.5)
         fixture.step(1)
         self.assertEqual(fixture.saves(), [0, 1])
@@ -127,7 +137,7 @@ class FlashlightControllerTests(unittest.TestCase):
     def test_third_value_after_single_issued_cycle_is_external_change_not_own_readback(self):
         fixture = Fixture(stored=1, selected=0)
         fixture.step(0.11)  # Own transition can produce only 1, not 2.
-        fixture.env.selected = 2
+        fixture.manual(2,0.2)
         fixture.step(0.2)
         fixture.step(0.4)
         self.assertEqual(fixture.saves(), [2])
@@ -145,6 +155,19 @@ class FlashlightControllerTests(unittest.TestCase):
         self.assertTrue(fixture.controller.current.blocked)
         self.assertEqual(len(fixture.applies()), 1)
         self.assertEqual(fixture.saves(), [])
+
+    def test_low_level_setter_does_not_replace_a_known_preference(self):
+        fixture=Fixture(stored=2,selected=2);fixture.step(0)
+        fixture.env.selected=0;fixture.step(.2);fixture.step(1)
+        self.assertEqual(fixture.saves(),[]);self.assertEqual(fixture.env.stored,2)
+        self.assertEqual(fixture.applies(),[])
+
+    def test_unknown_third_result_stops_without_learning_or_repeating(self):
+        fixture=Fixture(stored=1,selected=0);fixture.step(.11)
+        fixture.env.selected=2;fixture.step(.2);fixture.step(.4)
+        self.assertTrue(fixture.controller.current.blocked)
+        self.assertEqual(fixture.saves(),[]);self.assertEqual(fixture.env.stored,1)
+        self.assertEqual(len(fixture.applies()),1)
 
 
     def test_absent_module_does_not_invent_preference(self):
@@ -175,7 +198,7 @@ class FlashlightControllerTests(unittest.TestCase):
         fixture = Fixture(stored=2, selected=2)
         fixture.step(0)
         fixture.env.save_error = "disk full"
-        fixture.env.selected = 1
+        fixture.manual(1,0.1)
         fixture.step(0.1)
         fixture.equip("weapon-b", 2, 0.2)
         fixture.env.selected = 0

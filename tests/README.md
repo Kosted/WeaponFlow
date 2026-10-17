@@ -20,6 +20,11 @@ Fixtures are fake registry/files/keys or byte-addressed native memory; a passing
 check does not demonstrate actual in-game input, weapon behavior or engine safety.
 Game validation is reserved for the changed behavior, not old confirmed baselines.
 
+Native observer checks publish into private writable API slots in a separately
+compiled test DLL inside the test Python process. They never attach to Helldivers.
+Build that test helper with `build_native_events.py --test --zig C:\path\to\zig.exe`.
+The production binary excludes the synthetic targets and test exports.
+
 Old standalone input, Bindings.ini synchronization, shared-input editing and
 legacy native serialization checks were removed. Shared data fixtures are in
 `input_fixtures.py` and `binding_fixtures.py`, not imported from retired tests.

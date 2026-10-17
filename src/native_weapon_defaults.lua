@@ -4,7 +4,7 @@ if rawget(_G, "ConstantinWeaponModesTrial") then return rawget(_G, "ConstantinWe
 local build=assert(BuildConfig,"WeaponFlow build configuration required")
 local diagnostics=build.diagnostics==true
 local presets_enabled=build.presets~=false
-local state = {version=build.version, flavor=build.flavor, status="starting", equips=0, actions=0}
+local state = {version=build.version, flavor=build.flavor, status="starting", equips=0, actions=0,first_run=true}
 rawset(_G, "ConstantinWeaponModesTrial", state)
 local loader = rawget(_G, "CowboyBingusModLoader")
 local previous_update = rawget(_G, "update")
@@ -22,8 +22,9 @@ local RELEASE_EVENTS={READY=true,INACTIVE=true,ERROR=true,SETTINGS_UNAVAILABLE=t
     SHUTDOWN_BEGIN=true,HUD_SHUTDOWN=true,SHUTDOWN_END=true,SHUTDOWN_ERROR=true,
     AUTO_PRESETS=true,AUTO_PRESETS_SKIP=true,AUTO_PRESETS_WAIT=true,AUTO_PRESETS_FAILED=true,
     PRESET_NORMALIZED=true,PRESET_RULE_SKIP=true,LIGHT_SAVED=true,LIGHT_WAIT=true,LIGHT_STOP=true,LIGHT_SKIP=true,LIGHT_ERROR=true,
+    LIGHT_EQUIP=true,LIGHT_STATE=true,LIGHT_CYCLE=true,LIGHT_VERIFIED=true,
     HELP_READY=true,HELP_ERROR=true,RESET=true,RESET_FAILED=true,RESET_SKIP=true,MOD_SETTINGS=true,
-    MOD_BINDINGS=true,CLEAR_SKIP=true}
+    MOD_BINDINGS=true,CLEAR_SKIP=true,NATIVE_EVENTS=true}
 local function open_log(name)
     if not loader or type(loader.open_log)~="function" then return nil end
     local ok,file=pcall(loader.open_log,name)
@@ -49,18 +50,17 @@ local function log(message)
 end
 local ffi = require("ffi")
 local kernel, user32 = ffi.load("kernel32"), ffi.load("user32")
-local function bind(library,name,declaration)
+local function bind(library,name,result,args)
     local ok,value=pcall(function() return library[name] end)
-    if not ok then ffi.cdef(declaration); value=library[name] end
-    return value
+    if not ok then ffi.cdef(result.." __stdcall "..name..args..";"); value=library[name] end
+    return ffi.cast(result.." (__stdcall *)"..args,value)
 end
-local tick=bind(kernel,"GetTickCount64","unsigned long long GetTickCount64(void);")
-local get_pid=bind(kernel,"GetCurrentProcessId","unsigned long GetCurrentProcessId(void);")
-local get_foreground=bind(user32,"GetForegroundWindow","void *GetForegroundWindow(void);")
-local get_window_pid=bind(user32,"GetWindowThreadProcessId","unsigned long GetWindowThreadProcessId(void *, unsigned long *);")
+local tick=bind(kernel,"GetTickCount64","unsigned long long","(void)")
+local get_pid=bind(kernel,"GetCurrentProcessId","unsigned long","(void)")
+local get_foreground=bind(user32,"GetForegroundWindow","void *","(void)")
+local get_window_pid=bind(user32,"GetWindowThreadProcessId","unsigned long","(void *, unsigned long *)")
 -- Other addons may declare DWORD as uint32_t (unsigned int). On Windows x64
 -- both are 32 bits; use our exact pointer signature for our own output buffer.
-get_window_pid=ffi.cast("unsigned long (*)(void *, unsigned long *)",get_window_pid)
 local pid=tonumber(get_pid())
 local pid_buffer=ffi.new("unsigned long[1]")
 local function now() return tonumber(tick())/1000 end
@@ -79,8 +79,8 @@ if not loader or tonumber(loader.api)~=1 or type(previous_update)~="function" th
     log("INACTIVE: BSL API 1 and update callback required"); return state
 end
 if type(ModBindings)~="table" or not ModBindings.available(rawget(_G,"ModBindingsMenu")) then
-    state.status="inactive: Mod Bindings Menu v2.1 required"
-    log("INACTIVE: Mod Bindings Menu v2.1 required; enable its addon in Arsenal")
+    state.status="inactive: Mod Bindings Menu v2.1 or v2.2 required"
+    log("INACTIVE: Mod Bindings Menu v2.1 or v2.2 required; enable its addon in Arsenal")
     if session_log then pcall(function() session_log:close() end);session_log=nil end
     if latest_log then pcall(function() latest_log:close() end);latest_log=nil end
     return state
@@ -92,19 +92,30 @@ if rawget(_G,"ConstantinWeaponDefaultsVerified") or rawget(_G,"ConstantinRailgun
 end
 local reader,reason=NativeReader.new()
 if not reader then log("INACTIVE: "..tostring(reason)); return state end
+local native_events,event_error=NativeWeaponEvents.new(reader,{payload=NativeWeaponEventsPayload})
+if not native_events then
+    state.status="inactive: native observer unavailable"
+    log("INACTIVE: "..tostring(event_error));return state
+end
+log("NATIVE_EVENTS equipped/holder/light/mode notifications ready")
+state.stop_native_events=function()return native_events:shutdown()end
 Text.configure({language_provider=function() return NativeTextLanguage.read(reader) end})
 local text_next_language=0
 local function unhex(text)
     return (text:gsub("..",function(pair) return string.char(tonumber(pair,16)) end))
 end
+local function u32(bytes,offset)
+    local a,b,c,d=bytes:byte(offset+1,offset+4);return a+b*256+c*65536+d*16777216
+end
 assert(WeaponModes.cycle.signature_hex==Flashlight.cycle.signature_hex,"native cycle signatures disagree")
 local cycle_signature=unhex(WeaponModes.cycle.signature_hex)
 local cycle_fn,cycle_base
+local direct_selection=NativeWeaponSelection.new({modes=WeaponModes})
 local function invoke_cycle(snapshot,modes,direction)
     if not presets_enabled then return nil,"presets disabled in Arsenal" end
     local valid,why=reader:verify()
     if not valid then return nil,why end
-    if reader.api.read(reader.game+WeaponModes.cycle.rva,#cycle_signature)~=cycle_signature then
+    if not native_events:matches(WeaponModes.cycle.rva,cycle_signature) then
         return nil,"native cycle code signature mismatch"
     end
     local checked,error_text=reader:transaction(function(read,ptr,lookup)
@@ -122,7 +133,7 @@ local function invoke_cycle(snapshot,modes,direction)
     end
     -- The game's own general weapon-function action changes the actual modes.
     -- UI cache invalidation below mirrors the UI caller's separate dirty flag.
-    cycle_fn(ffi.cast("void *",modes.weapon_manager),modes.weapon_eid,direction.action_enum)
+    native_events:own_call(cycle_fn,ffi.cast("void *",modes.weapon_manager),modes.weapon_eid,direction.action_enum)
     return true
 end
 
@@ -160,9 +171,29 @@ local settings=store or hud_profile
 local presets_active=presets_enabled and store~=nil
 local hud,hud_layout,hud_problem,hud_frame_valid,hud_move_frame
 local hud_next_read,hud_identity,hud_last_allowed=0,nil,false
+local hud_dirty,hud_retry_until=true,0
 local hud_direction_problem={}
 local help,help_problem,help_frame_valid,help_latch,help_latch_kind,help_identity,help_kind
 local help_next_read,help_content_valid=0,false
+local help_marks,wheel_problem={},nil
+local onboarding,onboarding_progress,onboarding_frame_valid,onboarding_problem
+local onboarding_next_read,onboarding_next_write=0,0
+local onboarding_next_refresh,onboarding_identity,onboarding_content_valid=0,nil,false
+local function onboarding_step(name)
+    if onboarding_progress and (not onboarding_progress.first_run or onboarding_progress[name]) then return end
+    if now()<onboarding_next_write then return end
+    local menu=input and input.menu_state
+    if not menu or type(menu.complete_step)~="function" then return end
+    local safe,value,why=pcall(menu.complete_step,menu,name)
+    if safe and value then
+        onboarding_progress=value;state.first_run=value.first_run
+        onboarding_next_refresh=0
+    else
+        onboarding_next_write=now()+2
+        local message=tostring(safe and why or value)
+        if message~=onboarding_problem then log("ONBOARDING_SKIP "..message);onboarding_problem=message end
+    end
+end
 local presets_transfer=PresetsTransfer.new()
 if settings and (presets_active or build.hud) and type(previous_shutdown)=="function" then
     local ok,value,why=pcall(HelpHud.new,{font=HudFont,icons=WeaponHudIcons,log=log})
@@ -186,7 +217,7 @@ if build.hud and hud_profile then
         local layout,err=HudLayout.new(hud_profile,log)
         if not layout then return nil,err end
         hud_layout=layout
-        return WeaponHud.new({layout=layout,icons=WeaponHudIcons,font=HudFont,log=log,display=layout.display})
+        return WeaponHud.new({layout=layout,icons=WeaponHudIcons,font=HudFont.heading or HudFont,log=log,display=layout.display})
     end)
     if ok then hud=value else why=value end
     log(hud and ("HUD_READY card+HUD binding opens help; later presses select property/hidden; "..
@@ -334,6 +365,8 @@ end
 local function readback_matches(dir,expected)
     return dir and dir.readable and dir.action_enum==expected.action and
         dir.module_bytes==expected.module_bytes and equal(dir.current,expected.next_value) and
+        (expected.direct_slot==nil or (dir.slot==expected.direct_slot and
+            (dir.kind~="rpm" or equal(dir.effective_rpm,expected.next_value)))) and
         (not expected.primary_activation or (dir.safety_override==0 and dir.slot==expected.ordinary_slot))
 end
 local function describe(modes)
@@ -351,9 +384,16 @@ local function describe(modes)
     return table.concat(result," ")
 end
 local baseline,last_key,job,transition_seen,after_pass,hand_context
+local event_state={resolve_needed=true,resolve_until=now()+8,native_state_ready=false,next_resolve=0}
+local function request_resolution(time,duration)
+    event_state.resolve_until=event_state.resolve_needed and math.max(event_state.resolve_until,time+duration) or time+duration
+    event_state.resolve_needed=true
+end
+
 local light_controller
 local preset_cursor,pending_preset=1,nil
-local temporary_departure,last_context_problem
+local temporary_departure
+
 local grenade_input_status,grenade_input_sequence=nil,0
 local function observe_grenade_input(controls)
     if not diagnostics or not controls then return end
@@ -377,9 +417,8 @@ local function observe_grenade_input(controls)
             tostring(job and job.cause).." actions_total="..state.actions)
     end
 end
-local next_resolve,next_job=0,0
+local next_job=0
 local last_problem
-local last_watch_problem
 local next_problem_log=0
 local function problem(message)
     if last_problem~=message then
@@ -408,13 +447,17 @@ local function application_job(snapshot,time,preset,profile,cause)
          problems={},seq=state.equips}
 end
 local function start_job(snapshot,time)
+    hud_dirty=true;hud_retry_until=time+1;hud_next_read=0
     help_latch=nil;help_latch_kind=nil;help_identity=nil;help_next_read=0
     after_pass=nil
     if job then log("CANCEL equip="..job.seq.." reason=actual active identity changed") end
     state.equips=state.equips+1
     preset_cursor,pending_preset=1,nil
     state.preset=1
-    if light_controller then light_controller:equip(key(snapshot),state.equips,time) end
+    if light_controller then
+        light_controller:equip(key(snapshot),state.equips,time)
+        log("LIGHT_EQUIP equip="..state.equips.." native="..snapshot.active_weapon.entity.eid)
+    end
     local e=snapshot.active_weapon.entity
     local profile
     if presets_active then
@@ -460,7 +503,7 @@ local function present_help_impl(snapshot,time,controls)
         help_identity,help_kind,help_next_read=identity,kind,0
         help_content_valid=false
     end
-    if controls.save_preset or controls.hud_select_pressed or controls.pressed or controls.last_pressed_changed then help_next_read=0 end
+    if controls.save_preset or controls.hud_select_pressed or controls.pressed then help_next_read=0 end
     if time>=help_next_read then
         help_next_read=time+0.10
         help_content_valid=false
@@ -502,7 +545,8 @@ local function present_help_impl(snapshot,time,controls)
                 break
             end
         end
-        local lines
+        local geometry,geometry_error=WeaponUI.choice_geometry(reader,snapshot,modes)
+        local lines,shown_presets,shown_limit,shown_side
         if kind=="presets" then
             local limit,limit_error=preset_limit(modes)
             if not limit then
@@ -517,21 +561,43 @@ local function present_help_impl(snapshot,time,controls)
                 if help_problem~=choice_error then log("HELP_ERROR preset icons: "..tostring(choice_error));help_problem=choice_error end
                 return
             end
-            lines=HelpModel.presets(presets,modes,ammo,controls,limit,choices)
+            lines=HelpModel.presets(presets,modes,ammo,controls,limit,choices,geometry)
+            shown_presets,shown_limit=presets,limit
         else
             local selected,err=hud_call("selection",snapshot.active_weapon.entity.resource_hex_le)
             if err then return end
+            local side=selected or HelpModel.auto_side(modes)
+            local dir=side and modes.directions[side]
+            local icons
+            if dir and dir.present and dir.readable and not dir.presence_unknown and not dir.inactive and
+               dir.action_enum~=5 and dir.kind~="flashlight" then
+                local icon_error
+                icons,icon_error=NativeHudIcons.inspect(reader,snapshot,modes,
+                    {weapon_modes=WeaponModes,laser_guide=LaserGuide,secondary_fire=SecondaryFire},side)
+                icon_error=icon_error or (icons and icons.directions[side] and icons.directions[side].reason)
+                if not icons or icon_error then
+                    if help_problem~=icon_error then log("HELP_ERROR property icon: "..tostring(icon_error));help_problem=icon_error end
+                    return
+                end
+            end
             controls.hud_display=hud.display
-            lines=HelpModel.property(modes,ammo,selected,controls)
+            lines=HelpModel.property(modes,ammo,selected,controls,icons,geometry)
+            shown_side=selected
         end
+        help_marks=geometry and HelpModel.wheel_marks(shown_presets,modes,shown_side,shown_limit,geometry,kind) or {}
+        if geometry_error and wheel_problem~=geometry_error then log("HELP_ERROR wheel marks: "..tostring(geometry_error)) end
+        wheel_problem=geometry_error
         local ready=help_call("set",lines)
         if not ready then return end
         help_content_valid=true
     end
     if not help_content_valid then return end
+    local overlaid=help_call("set_overlay",help_marks,kind=="property" and hud_call("editor_bounds") or nil)
+    if not overlaid then return end
     help_frame_valid=true
     local _,why=help_call("render",time)
     if why then help_frame_valid=false end
+    if help_frame_valid then onboarding_step(kind=="presets" and "presets" or "hud") end
 end
 local function present_help(snapshot,time,controls)
     local ok,why=pcall(present_help_impl,snapshot,time,controls)
@@ -540,32 +606,102 @@ local function present_help(snapshot,time,controls)
         help_frame_valid=false
     end
 end
-local function present_hud_impl(snapshot,time)
+local function present_onboarding(snapshot,time,controls)
+    if onboarding_progress and not onboarding_progress.first_run then return end
+    if type(previous_shutdown)~="function" then return end
+    if not controls or controls.gameplay_allowed~=true or controls.profile_valid==false or not foreground() then return end
+    local safe,why=pcall(function()
+        local menu=input and input.menu_state
+        if not menu or type(menu.onboarding)~="function" then return end
+        if not onboarding_progress then
+            if time<onboarding_next_read then return end
+            onboarding_next_read=time+2
+            local progress,error_text=menu:onboarding()
+            if not progress then error(error_text,0) end
+            onboarding_progress=progress;state.first_run=progress.first_run
+        end
+        if not onboarding_progress.first_run then return end
+        if onboarding_identity~=key(snapshot) then
+            onboarding_identity=key(snapshot);onboarding_next_refresh=0;onboarding_content_valid=false
+        end
+        if time>=onboarding_next_refresh then
+            onboarding_next_refresh=time+0.10;onboarding_content_valid=false
+            -- The verified native card constructor exists only in mission context4.
+            -- The card itself need not be open for this separate welcome window.
+            local context=WeaponUI.context(reader)
+            if not context or context.context_kind~=4 then return end
+            if controls.cycle_assigned then onboarding_step("swap") end
+            if not onboarding_progress.first_run then return end
+            if not onboarding then
+                local value,error_text=HelpHud.new({font=HudFont,icons=WeaponHudIcons,log=log,onboarding=true})
+                if not value then error(error_text,0) end
+                onboarding=value
+            end
+            local ready,error_text=onboarding:set(HelpModel.onboarding(onboarding_progress,controls))
+            if not ready then error(error_text,0) end
+            onboarding_content_valid=true
+        end
+        if not onboarding_content_valid then return end
+        local _,render_error=onboarding:render(time)
+        if render_error then error(render_error,0) end
+        onboarding_frame_valid=true
+    end)
+    if not safe and why~=onboarding_problem then log("ONBOARDING_SKIP "..tostring(why));onboarding_problem=why end
+end
+local function present_hud_impl(snapshot,time,controls)
     if not hud then return end
     hud_frame_valid=true
     local identity=key(snapshot)
     if identity~=hud_identity then
         hud_identity=identity;hud_next_read=0;hud_last_allowed=false;hud_call("hide")
+        hud_dirty=true;hud_retry_until=time+1
     end
-    if time>=hud_next_read then
+    local editing=controls and controls.held_reload and help_latch==identity and help_latch_kind=="property"
+    if editing then
+        local card=WeaponUI.inspect(reader,snapshot)
+        editing=card and not card.hidden and card.cached_eid==snapshot.active_weapon.entity.eid and
+            card.display_eid==display_eid(snapshot) and preset_input_allowed(snapshot)==true
+    end
+    if hud_call("edit",editing,nil,controls and controls.hud_label,controls and controls.hud_trigger) then
+        hud_next_read=0;hud_dirty=true;hud_retry_until=time+1
+    end
+    if editing then hud_dirty=true;hud_retry_until=time+1 end
+    if hud_dirty and time>=hud_next_read and time<=hud_retry_until then
         hud_next_read=time+0.10
+        hud_last_allowed=false
         local allowed,why=preset_input_allowed(snapshot)
-        hud_last_allowed=allowed==true
         if not allowed then hud_call("hide");return end
         local selected,selection_error=hud_call("selection",snapshot.active_weapon.entity.resource_hex_le)
         if selection_error then hud_call("hide");return end
-        if selected=="None" then
+        if selected=="None" and not editing then
             hud_call("set",{directions={}},{directions={}},selected)
+            hud_dirty=false;hud_last_allowed=true
             hud_call("render",time);return
         end
-        local modes,error_text=inspect(snapshot,nil,selected or true)
+        local hud_only=selected or true
+        if editing then hud_only=nil end
+        local modes,error_text=inspect(snapshot,nil,hud_only)
         if not modes then
             hud_call("hide")
             if hud_problem~=error_text then log("HUD_SKIP "..tostring(error_text));hud_problem=error_text end
             return
         end
-        if selected and modes.directions[selected] and modes.directions[selected].action_enum==5 then
+        local direction=selected and modes.directions[selected]
+        local ghost=editing and ((selected==nil and HelpModel.auto_side(modes)==nil) or selected=="None" or (selected and (not direction or not direction.present or
+            direction.action_enum==5 or direction.kind=="flashlight")))
+        if ghost then
+            selected=nil
+            for _,side in ipairs(SIDES) do
+                local dir=modes.directions[side]
+                if dir and dir.present and not dir.presence_unknown and dir.action_enum~=5 and dir.kind~="flashlight" then
+                    selected=side;break
+                end
+            end
+        end
+        hud_call("edit",editing,ghost,controls and controls.hud_label,controls and controls.hud_trigger)
+        if not editing and selected and modes.directions[selected] and modes.directions[selected].action_enum==5 then
             hud_call("set",{directions={}},{directions={}},selected)
+            hud_dirty=false;hud_last_allowed=true
             hud_call("render",time);return
         end
         local icons,icon_error=NativeHudIcons.inspect(reader,snapshot,modes,
@@ -584,12 +720,13 @@ local function present_hud_impl(snapshot,time)
             end
             hud_direction_problem[side]=why
         end
-        hud_call("set",modes,icons,selected)
+        hud_call("set",modes,icons,selected,time,identity)
+        hud_dirty=false;hud_last_allowed=true
     end
     if hud_last_allowed then hud_call("render",time) end
 end
-local function present_hud(snapshot,time)
-    local ok,why=pcall(present_hud_impl,snapshot,time)
+local function present_hud(snapshot,time,controls)
+    local ok,why=pcall(present_hud_impl,snapshot,time,controls)
     if not ok then
         log("HUD_ERROR disabled after presentation read failure: "..tostring(why))
         hud_call("hide");hud=nil
@@ -717,12 +854,16 @@ local function step_job(snapshot,time)
             readback_failed=true
         elseif readback_matches(dir,expected) then
             if diagnostics then log("VERIFIED equip="..job.seq.." preset="..job.preset.." side="..expected.side.." native="..modes.weapon_eid..
-                " before="..expected.before.." after="..dir.current) end
+                " before="..expected.before.." after="..dir.current..
+                (expected.direct_slot~=nil and (" direct=true slot="..expected.direct_slot..
+                    " effective_rpm="..tostring(dir.effective_rpm)) or "")) end
             job.awaiting=nil
+            hud_dirty=true;hud_retry_until=time+0.50;hud_next_read=0
         elseif time<expected.deadline and equal(dir.current,expected.before) then return
         else
             log("STOP equip="..job.seq.." side="..expected.side.." expected="..expected.next_value..
-                " actual="..tostring(dir.current).." reason=unexpected/no transition")
+                " actual="..tostring(dir.current).." slot="..tostring(dir.slot)..
+                " effective_rpm="..tostring(dir.effective_rpm).." reason=unexpected/no transition")
             job.done[expected.side]=true; job.awaiting=nil
             readback_failed=true
         end
@@ -816,16 +957,25 @@ local function step_job(snapshot,time)
             end
             local before=activation and activation.before or dir.current
             local expected=activation and activation.next_value or dir.choices[index%#dir.choices+1]
-            if diagnostics then log("CYCLE equip="..job.seq.." preset="..job.preset.." native="..fresh.weapon_eid.." side="..side..
+            local direct=not activation and #dir.choices==3 and not equal(expected,target.value)
+            if direct then expected=target.value end
+            if diagnostics then log((direct and "SELECT" or "CYCLE").." equip="..job.seq.." preset="..job.preset.." native="..fresh.weapon_eid.." side="..side..
                 " action="..dir.action_enum.." before="..before.." next="..expected.." target="..target.value..
                 (activation and " primary_activation=true" or "")) end
-            local called,call_error=invoke_cycle(snapshot,fresh,current)
+            local called,call_error
+            -- A native call can fail after a partial side effect. Invalidate
+            -- presentation even then; this never retries or guesses a mode.
+            hud_dirty=true;hud_retry_until=time+0.50;hud_next_read=0
+            if direct then called,call_error=direct_selection:apply(reader,snapshot,side,target.value,fresh)
+            else called,call_error=invoke_cycle(snapshot,fresh,current) end
             if not called then log("STOP reason="..tostring(call_error));job=nil;pending_preset=nil;return end
-            if diagnostics then log("CALLED equip="..job.seq.." preset="..job.preset.." native="..fresh.weapon_eid.." side="..side.." action="..current.action_enum) end
+            if diagnostics then log("CALLED equip="..job.seq.." preset="..job.preset.." native="..fresh.weapon_eid.." side="..side..
+                " action="..current.action_enum.." direct="..tostring(direct)) end
             invalidate_card(snapshot,job.seq,side,current.action_enum==11 or activation~=nil)
             state.actions=state.actions+1
             if activation then job.primary_attempted[side]=true else job.attempts[side]=attempts+1 end
             job.awaiting={side=side,before=before,next_value=expected,action=dir.action_enum,
+                          direct_slot=direct and called.slot or nil,
                           primary_activation=activation~=nil,ordinary_slot=activation and activation.ordinary_slot,
                           module_bytes=dir.module_bytes,deadline=time+0.50}
             return
@@ -868,13 +1018,18 @@ local function cancel_reset_work()
     -- the freshly reset sidecar at the end of this frame.
     cancel_weapon_commands()
     baseline,last_key,job,transition_seen,after_pass,hand_context=nil,nil,nil,nil,nil,nil
+    native_events:track(nil);event_state.resolve_needed=true;event_state.resolve_until=now()+1
+    event_state.native_state_ready=false
     temporary_departure=nil;pending_preset=nil;preset_cursor=1
     help_latch,help_latch_kind,help_identity,help_kind=nil,nil,nil,nil
     help_next_read,help_content_valid=0,false
     help_call("hide")
+    if onboarding then pcall(onboarding.hide,onboarding) end
+    onboarding_frame_valid=false
     if light_controller then light_controller:reset(true) end
     if hud then hud_call("cancel_move");hud_call("hide") end
     hud_identity,hud_last_allowed,hud_next_read=nil,false,0
+    hud_dirty=true;hud_retry_until=now()+1
     hud_frame_valid,hud_move_frame,help_frame_valid=false,false,false
 end
 local function reload_after_reset(profile)
@@ -897,6 +1052,8 @@ local function reload_after_reset(profile)
     input=fresh_input;store,hud_profile,settings=nil,nil,nil;presets_active=false
     input:publish_reset_defaults()
     menu_state_ready,menu_state_next,menu_state_problem=false,0,nil
+    onboarding_progress,onboarding_next_read,onboarding_next_write,onboarding_problem=nil,0,0,nil
+    onboarding_next_refresh,onboarding_identity,onboarding_content_valid=0,nil,false
     if presets_enabled then
         store,input_error=DefaultsStore.open(profile)
         if not store then error(input_error or "reset preset settings unreadable",0) end
@@ -910,11 +1067,11 @@ local function reload_after_reset(profile)
     settings=store or hud_profile
     rebuild_light_controller()
     hud_direction_problem={};hud_problem=nil;help_problem=nil
-    next_resolve,next_job=0,0;last_problem,last_watch_problem,last_context_problem=nil,nil,nil
+    event_state.next_resolve,next_job=0,0;last_problem=nil
     if build.hud and hud_profile then
         hud_layout,input_error=HudLayout.new(hud_profile,log)
         if not hud_layout then error(input_error or "reset HUD settings unreadable",0) end
-        hud,input_error=WeaponHud.new({layout=hud_layout,icons=WeaponHudIcons,font=HudFont,log=log,
+        hud,input_error=WeaponHud.new({layout=hud_layout,icons=WeaponHudIcons,font=HudFont.heading or HudFont,log=log,
             display=hud_layout.display})
         if not hud then error(input_error or "reset HUD initialization failed",0) end
     end
@@ -1072,22 +1229,11 @@ local function contextual_command_allowed(snapshot,controls,kind)
     local card=WeaponUI.inspect(reader,fresh)
     return card~=nil and not card.hidden and card.cached_eid==fresh.active_weapon.entity.eid and card.display_eid==display_eid(fresh)
 end
-local function change_contextual_language(snapshot,time,controls)
-    if not controls or not controls.locale_pressed then return end
-    local safe,selected,why=pcall(input.cycle_language,input,time,foreground(),function()
-        return contextual_command_allowed(snapshot,controls)
-    end)
-    if safe and selected then
-        -- Language selection is presentation only. Rebuild both HUDs during
-        -- this frame instead of waiting for their ordinary 10 Hz refresh.
-        hud_next_read,help_next_read=0,0
-    elseif diagnostics then pcall(log,"LANGUAGE_SKIP reason="..tostring(safe and why or selected)) end
-end
 local function change_hud_display(snapshot,controls)
     if not controls or not controls.hud_display_pressed or not hud or not hud_layout or
        not contextual_command_allowed(snapshot,controls,"property") then return end
     local selected,why=hud_call("cycle_display")
-    if selected then hud_next_read,help_next_read=0,0
+    if selected then hud_next_read,help_next_read=0,0;hud_dirty=true;hud_retry_until=now()+1
     elseif diagnostics then pcall(log,"HUD_DISPLAY_SKIP reason="..tostring(why)) end
 end
 local function transfer_account_presets(snapshot,controls)
@@ -1153,7 +1299,7 @@ local function select_hud_direction(snapshot,controls)
     end
     local selected=hud_call("cycle_selection",fresh.active_weapon.entity.resource_hex_le,available)
     if selected then
-        hud_next_read=0;help_next_read=0
+        hud_next_read=0;help_next_read=0;hud_dirty=true;hud_retry_until=now()+1
     end
 end
 local function save_controls_impl(snapshot,time,controls)
@@ -1248,66 +1394,95 @@ local function context_matches(context,snapshot)
         context.avatar_bytes==snapshot.avatar_bytes and
         context.candidate_entity.bytes==snapshot.active_weapon.bytes
 end
-local function temporary_context(context)
-    if not context then return false end
-    if context.candidate_kind=="empty" or context.candidate_kind=="utility" then return true end
-    -- A registered hand item outside all three weapon slots may have its own
-    -- WeaponData (some throwables do). Stable membership is enough to leave
-    -- it alone; no need to resolve its modes every frame. Unknown main-slot
-    -- entities still retry because they may be a briefly unready real weapon.
-    local slots=context.slots
-    return context.candidate_kind=="unknown" and context.candidate_entity and slots and
-        slots.primary~=context.selection_eid and slots.sidearm~=context.selection_eid and
-        slots.support~=context.selection_eid
+local function native_departure(reason)
+    event_state.native_state_ready=false
+    help_latch=nil;help_latch_kind=nil
+    if light_controller then light_controller:pause() end
+    temporary_departure=true;cancel_weapon_commands();after_pass=nil
+    if job then log("CANCEL equip="..job.seq.." reason="..reason);job=nil end
 end
-local function observe_hand(reference,expected_pair)
-    local context,why=EquipContext.inspect(reader,reference,expected_pair)
-    if not context then
-        if last_context_problem~=why then
-            if diagnostics then log("HAND_UNAVAILABLE reason="..tostring(why)) end
-            last_context_problem=why
+local function consume_native_events(rows,time)
+    for _,event in ipairs(rows) do
+        if diagnostics then log("NATIVE_EVENT seq="..event.sequence.." kind="..event.kind..
+            " eid="..tostring(event.eid).." action="..tostring(event.action).." own="..tostring(event.own)..
+            (event.replicated and " source=replicated_state" or "")..
+            (event.kind==3 and (" light_before="..tostring(event.before_light).." light_after="..tostring(event.light)) or "")) end
+        if event.kind==1 then
+            -- These are completed native writes, with inventory/identity
+            -- copied at that moment. Preserve each intermediate A->B->A.
+            if baseline and event.observed and
+               event.avatar_bytes:sub(1,20)==baseline.avatar_bytes:sub(1,20) then
+                local previous=baseline.active_weapon.entity.eid
+                local retained=false
+                for _,eid in ipairs(event.slots) do if eid==previous then retained=true end end
+                local departed=event.eid~=previous
+                local other=event.main and (departed or
+                    event.weapon_bytes:sub(1,20)~=baseline.active_weapon.bytes:sub(1,20))
+                transition_seen=transition_seen or not retained or other
+                if departed or not retained or other then native_departure("completed native hand change") end
+                if diagnostics then log("HAND previous="..previous.." observed="..event.eid..
+                    " category="..(event.main and "weapon" or event.empty and "empty" or "utility/unknown")..
+                    " previous_retained="..tostring(retained).." event=true") end
+            else event_state.native_state_ready=false end
+            request_resolution(time,0.75);event_state.next_resolve=0
+            hud_dirty=true;hud_retry_until=time+1;hud_next_read=0
+        elseif event.kind==2 then
+            if baseline and event.avatar_bytes:sub(1,20)==baseline.avatar_bytes:sub(1,20) and
+               event.weapon_bytes:sub(1,20)==baseline.active_weapon.bytes:sub(1,20) and
+               event.before_holder==u32(baseline.avatar_bytes,8) and event.holder~=event.before_holder then
+                transition_seen=true;native_departure("verified native holder loss")
+            end
+            request_resolution(time,0.75);event_state.next_resolve=0
+        elseif event.kind==3 and light_controller then
+            local identity=event.avatar_bytes:sub(1,20)..event.weapon_bytes:sub(1,20)
+            if event.changed and not event.own and event.action==5 then
+                light_controller:observed_change(identity,event.light,event.module_bytes,time)
+            else light_controller:notify(identity,time) end
+        elseif event.kind==4 then
+            if baseline and (event.eid==baseline.active_weapon.entity.eid or event.eid==display_eid(baseline)) then
+                -- Secondary activation can change the parent/display pair.
+                request_resolution(time,0.50);event_state.next_resolve=0
+                hud_dirty=true;hud_retry_until=time+0.50;hud_next_read=0
+            end
+        elseif event.kind==5 then
+            if event.action==5 then
+                if baseline and light_controller then light_controller:notify(key(baseline),time) end
+            else
+                native_departure("native observation unavailable")
+                request_resolution(time,0.50);event_state.next_resolve=0
+                hud_dirty=true;hud_retry_until=time+0.50;hud_next_read=0
+            end
+        elseif event.kind==6 then
+            if baseline and event.avatar_bytes:sub(1,20)==baseline.avatar_bytes:sub(1,20) then
+                native_departure("native avatar/wielder removed")
+                baseline,last_key,hand_context,job,after_pass=nil,nil,nil,nil,nil
+                transition_seen=false;event_state.resolve_needed=false
+                native_events:track(nil)
+                if light_controller then light_controller:reset() end
+            end
+        elseif event.kind==7 then
+            if event.changed then
+                native_departure("local avatar reference committed")
+                baseline,last_key,hand_context,job,after_pass=nil,nil,nil,nil,nil
+                transition_seen=false;native_events:track(nil)
+                if light_controller then light_controller:reset() end
+            end
+            request_resolution(time,8);event_state.next_resolve=0
+            hud_dirty=true;hud_retry_until=time+1;hud_next_read=0
         end
-        hand_context=nil
-        return nil,why
     end
-    last_context_problem=nil
-    local previous=hand_context
-    hand_context=context
-    if diagnostics and (not previous or previous.selection_bytes~=context.selection_bytes or
-       previous.candidate_kind~=context.candidate_kind or previous.previous_in_main~=context.previous_in_main) then
-        log("HAND previous="..reference.active_weapon.entity.eid.." observed="..context.selection_eid..
-            " category="..context.candidate_kind.." slot="..tostring(context.candidate_slot)..
-            " previous_retained="..tostring(context.previous_in_main))
-    end
-    -- Inventory only classifies an actually observed hand EID. Empty hands,
-    -- grenade/stim objects and unknown registry entries are never weapon
-    -- switch evidence. No time window or control press can create an equip.
-    if baseline and reference==baseline then
-        local departed=context.selection_eid~=baseline.active_weapon.entity.eid
-        local real_departure=not context.previous_in_main or
-            (context.candidate_kind=="weapon" and departed)
-        if diagnostics and real_departure and not transition_seen then
-            log("WEAPON_DEPARTURE previous="..baseline.active_weapon.entity.eid..
-                " observed="..context.selection_eid.." reason="..
-                (context.previous_in_main and "another main weapon selected" or "previous weapon left inventory"))
-        end
-        transition_seen=transition_seen or real_departure
-        if departed or real_departure then
-            help_latch=nil;help_latch_kind=nil
-            if light_controller then light_controller:pause() end
-            temporary_departure=true
-            cancel_weapon_commands()
-            after_pass=nil
-            if job then log("CANCEL equip="..job.seq.." reason=native hand departure");job=nil end
-        end
-    end
-    return context
 end
 local function step()
     local time=now()
-    if time>=text_next_language then Text.read_language();text_next_language=time+2 end
+    local notifications,notification_error=native_events:drain()
+    if not notifications then error(notification_error or "native event stream unavailable",0) end
+    if time>=text_next_language then
+        local before=Text.language();Text.read_language();text_next_language=time+2
+        if before~=Text.language() then hud_dirty=true;hud_retry_until=time+1;hud_next_read=0 end
+    end
     local active_window=foreground()
     hud_frame_valid,hud_move_frame=false,false
+    onboarding_frame_valid=false
     local previous_help_visible=help_frame_valid
     help_frame_valid=false
     local controls
@@ -1356,6 +1531,7 @@ local function step()
         end
         state.hud_select_problem=controls.hud_select_reason
         if controls.profile_valid==false then
+            event_state.last_profile_valid=false;event_state.native_state_ready=false;event_state.resolve_needed=false;native_events:track(nil)
             if light_controller then light_controller:reset(true) end
             cancel_weapon_commands()
             if job then log("CANCEL equip="..job.seq.." reason=active Steam profile not validated") end
@@ -1372,105 +1548,76 @@ local function step()
             log("PRESET_SKIP reason=game lost foreground");job=nil
         end
     end
-    if baseline then
-        local unchanged,why,metrics=reader:watch(baseline,hand_context and hand_context.selection_bytes)
-        if unchanged then last_watch_problem=nil
-        elseif last_watch_problem~=why then
-            if diagnostics then log("WATCH previous="..baseline.active_weapon.entity.eid.." reason="..tostring(why)) end
-            last_watch_problem=why
-        end
-        if metrics and metrics.authoritative_selection_change then
-            help_latch=nil;help_latch_kind=nil
-            if light_controller then light_controller:pause() end
-            -- A certain hand change cancels work even when its inventory
-            -- classification fails. Only observe_hand may turn it into a
-            -- real weapon departure; cancellation itself never does so.
-            temporary_departure=true
-            cancel_weapon_commands()
-            after_pass=nil
-            if job then log("CANCEL equip="..job.seq.." reason=verified native hand change");job=nil end
-        end
-        local same_weapon=context_matches(hand_context,baseline)
-        local context_stable=hand_context~=nil
-        -- While a utility is held, detect actual loss/drop of the retained
-        -- weapon even if the hand selection itself stays unchanged. Ordinary
-        -- stable weapon frames retain the established small native watch.
-        if unchanged and hand_context and not same_weapon then
-            context_stable=EquipContext.watch(reader,hand_context)
-        end
-        if not unchanged or not context_stable or
-           (hand_context and hand_context.candidate_kind=="unknown" and not temporary_context(hand_context)) then
-            observe_hand(baseline,metrics and metrics.observed_selection_bytes)
-            -- A refreshed classification is not a substitute for the native
-            -- watch's gameplay-state gates. The full resolver runs below.
-            same_weapon=context_matches(hand_context,baseline)
-        end
-        -- The hand cursor can already contain a new display child while its
-        -- full snapshot is still settling. It must not make an old parent/
-        -- display snapshot look usable forever after a single failed resolve.
-        local pair_matches=same_weapon and hand_context.selection_bytes==baseline.active_weapon.wielder_selection_bytes
-        if unchanged and same_weapon and pair_matches and not transition_seen then
-            if temporary_departure then
-                if diagnostics then log("UTILITY_RETURN weapon="..baseline.active_weapon.entity.eid.." preserve_manual=true") end
-                temporary_departure=nil
-            end
-            step_light(baseline,time,active_window)
-            change_contextual_language(baseline,time,controls)
-            change_hud_display(baseline,controls)
-            transfer_account_presets(baseline,controls)
-            save_controls(baseline,time,controls)
-            drive_pending_preset(baseline,time)
-            if job then step_job(baseline,time) end
-            drive_pending_preset(baseline,time)
-            observe_after_pass(baseline,time)
-            if active_window then present_help(baseline,time,controls) end
-            if active_window then present_hud(baseline,time) end
-            return
-        end
-        if unchanged and temporary_context(hand_context) then return end
-        -- Classification is observed before this resolver's throttle, so a
-        -- brief real A->B->A still latches B even before B has WeaponData or a
-        -- ready holder. An unknown read cannot latch a departure.
+    consume_native_events(notifications,time)
+    local gameplay=active_window and controls and controls.gameplay_allowed~=false
+    local recovering=event_state.last_profile_valid==false or (active_window and event_state.last_foreground==false) or
+        (gameplay and event_state.last_gameplay_allowed==false)
+    event_state.last_profile_valid=not controls or controls.profile_valid~=false
+    event_state.last_foreground=active_window;event_state.last_gameplay_allowed=gameplay==true
+    local requested=controls and (controls.pressed or controls.preset_pressed or controls.save_preset or
+        controls.cycle_pressed or controls.hud_select_pressed or controls.hud_display_pressed or
+        controls.clear_pressed or controls.export_pressed or controls.import_pressed)
+    local editing=controls and controls.held_reload and baseline and help_latch==key(baseline)
+    if recovering or requested or editing then
+        request_resolution(time,0.75);event_state.next_resolve=0
+        if recovering then event_state.native_state_ready=false;hud_dirty=true;hud_retry_until=time+1;hud_next_read=0 end
     end
-    if time<next_resolve then return end
-    next_resolve=time+0.015
+    if not event_state.resolve_needed and baseline and event_state.native_state_ready then
+        -- No equipment, attachment or mode read on a quiet gameplay frame.
+        step_light(baseline,time,active_window)
+        change_hud_display(baseline,controls)
+        transfer_account_presets(baseline,controls)
+        save_controls(baseline,time,controls)
+        drive_pending_preset(baseline,time)
+        if job then step_job(baseline,time) end
+        drive_pending_preset(baseline,time)
+        observe_after_pass(baseline,time)
+        if gameplay then
+            present_hud(baseline,time,controls);present_help(baseline,time,controls)
+            present_onboarding(baseline,time,controls)
+        end
+        return
+    end
+    if not event_state.resolve_needed then event_state.native_state_ready=false;return end
+    local final_resolve=time>event_state.resolve_until
+    if time<event_state.next_resolve then return end
+    event_state.next_resolve=time+0.015
     local snapshot,why=reader:active_weapon()
     if not snapshot then
-        help_latch=nil;help_latch_kind=nil
+        if final_resolve then event_state.resolve_needed=false end
+        event_state.native_state_ready=false;help_latch=nil;help_latch_kind=nil
         problem(why)
         if why=="not in mission" then
             if light_controller then light_controller:reset() end
-            cancel_weapon_commands()
+            cancel_weapon_commands();native_events:track(nil)
             baseline,last_key,job,transition_seen,after_pass,hand_context=nil,nil,nil,nil,nil,nil
-            temporary_departure=nil
-            next_resolve=time+0.25
+            temporary_departure=nil;event_state.next_resolve=time+0.25
         elseif tostring(why):find("mode-card avatar state blocks action",1,true) or
                why=="local player unavailable" or why=="game modules unavailable" then
-            cancel_weapon_commands()
-            next_resolve=time+0.10
+            cancel_weapon_commands();event_state.next_resolve=time+0.10
         end
         return
     end
     local context,context_error=EquipContext.inspect(reader,snapshot,
         snapshot.active_weapon.wielder_selection_bytes)
     if not context or not context_matches(context,snapshot) then
-        help_latch=nil;help_latch_kind=nil
+        if final_resolve then event_state.resolve_needed=false end
+        event_state.native_state_ready=false;help_latch=nil;help_latch_kind=nil
         problem(context_error or "selected item is not a verified main weapon")
         return
     end
     last_problem=nil
     local changed=key(snapshot)~=last_key or transition_seen
-    baseline=snapshot
-    hand_context=context
+    baseline=snapshot;hand_context=context;native_events:track(snapshot)
+    event_state.native_state_ready=true;event_state.resolve_needed=false
     if changed then
         cancel_weapon_commands()
-        last_key=key(snapshot); transition_seen=false; start_job(snapshot,time)
+        last_key=key(snapshot);transition_seen=false;start_job(snapshot,time)
     elseif diagnostics and temporary_departure then
         log("UTILITY_RETURN weapon="..snapshot.active_weapon.entity.eid.." preserve_manual=true")
     end
     temporary_departure=nil
     step_light(snapshot,time,active_window)
-    change_contextual_language(snapshot,time,controls)
     change_hud_display(snapshot,controls)
     transfer_account_presets(snapshot,controls)
     save_controls(snapshot,time,controls)
@@ -1478,19 +1625,25 @@ local function step()
     step_job(snapshot,time)
     drive_pending_preset(snapshot,time)
     observe_after_pass(snapshot,time)
-    if active_window then present_help(snapshot,time,controls) end
-    if active_window then present_hud(snapshot,time) end
+    if gameplay then
+        present_hud(snapshot,time,controls);present_help(snapshot,time,controls)
+        present_onboarding(snapshot,time,controls)
+    end
 end
 local stopped=false
 local function after_update(...)
     if not stopped then
         local ok,why=pcall(step)
-        if not ok then stopped=true; state.status="stopped"; log("ERROR automatic actions stopped: "..tostring(why)) end
+        if not ok then
+            stopped=true;state.status="stopped";pcall(native_events.shutdown,native_events)
+            log("ERROR automatic actions stopped: "..tostring(why))
+        end
         if hud then
             if not hud_move_frame then hud_call("finish_move") end
             if not hud_frame_valid or not ok then hud_call("hide") end
         end
         if help and (not help_frame_valid or not ok) then help_call("hide");help_content_valid=false end
+        if onboarding and (not onboarding_frame_valid or not ok) then pcall(onboarding.hide,onboarding) end
     end
     return ...
 end
@@ -1507,6 +1660,10 @@ if type(previous_shutdown)=="function" then
                 local function report(message) pcall(log,message) end
                 report("SHUTDOWN_BEGIN equips="..state.equips.." actions="..state.actions)
                 local cleanup_ok=true
+                local events_ok,events_closed=pcall(native_events.shutdown,native_events)
+                if not events_ok or not events_closed then
+                    cleanup_ok=false;report("SHUTDOWN_ERROR native observer cleanup")
+                end
                 job,pending_preset,after_pass,baseline,hand_context=nil,nil,nil,nil,nil
                 if light_controller then light_controller:reset(true) end
                 if input then pcall(input.cancel_events,input) end
@@ -1515,6 +1672,13 @@ if type(previous_shutdown)=="function" then
                     local closed,value,error_text=pcall(closing.shutdown,closing)
                     if not closed or not value or error_text then
                         cleanup_ok=false;report("SHUTDOWN_ERROR contextual HUD cleanup: "..tostring(error_text or value))
+                    end
+                end
+                if onboarding then
+                    local closing=onboarding;onboarding=nil
+                    local closed,value,error_text=pcall(closing.shutdown,closing)
+                    if not closed or not value or error_text then
+                        cleanup_ok=false;report("SHUTDOWN_ERROR welcome HUD cleanup: "..tostring(error_text or value))
                     end
                 end
                 if hud then
@@ -1544,13 +1708,13 @@ if type(previous_shutdown)=="function" then
         return previous_shutdown(...)
     end)
 end
-state.status="watching native equipment"
-log("READY Weapon Defaults v"..state.version.." flavor="..state.flavor.." presets="..tostring(presets_enabled).." hud="..tostring(build.hud==true).." local_time="..os.date("%Y-%m-%d %H:%M:%S"))
+state.status="receiving native equipment events"
+log("READY Weapon Defaults v"..state.version.." flavor="..state.flavor.." presets="..tostring(presets_enabled).." hud="..tostring(build.hud==true).." native_events=true local_time="..os.date("%Y-%m-%d %H:%M:%S"))
 if diagnostics then
     log("SESSION pid="..pid.."; UI dirty invalidation; 3 bounded read-only POST samples per completed equip")
     log("EQUIP_POLICY actual main weapon selection or inventory loss; retained weapon utility returns preserve manual modes")
     if presets_enabled then
-        log("SAVE_DEFAULTS hold the configured weapon-card control; use the MODS Preset menu action then 1/2/3; Clear presets and Swap presets use their own MODS assignments")
+        log("SAVE_DEFAULTS hold the configured weapon-card control; use Preset menu then 1/2/3; double-tap Preset menu to clear; Swap presets is assigned in MODS")
     end
 end
 return state

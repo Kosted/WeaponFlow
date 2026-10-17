@@ -101,7 +101,111 @@ def native_button(f,index,button_id,device=3,trigger=0,threshold=0):
             device=device,button_id=button_id,trigger=trigger,threshold_bits=bits,combine=0))])))
 
 
+def assignments_v22(legacy, session=15, seen=None):
+    rows=['format 2',f'session {session}']
+    rows.extend(line+'\t'+str(session if seen is None else seen) for line in legacy.splitlines() if line)
+    rows.extend([f'action 10:0 cleared {session+1} found 00000000 left 1234abcd',
+                 'action 11:3 clear','end'])
+    return '\n'.join(rows)+'\n'
+
+
+class AssignmentFormatTests(unittest.TestCase):
+    def test_both_formats_with_complete_native_metadata_keep_the_same_controls(self):
+        for current in (False,True):
+            with self.subTest(mbm22=current):
+                f=fixture();original=f.state.assignments
+                if current:f.state.assignments=assignments_v22(original)
+                result=f.poll()
+                for name in ('save','cycle','hud','reset'):self.assertTrue(result[name].ready)
+                parsed=f.module.parse_assignments(f.state.assignments)
+                self.assertEqual(parsed[f.module.ids.cycle].code,10*65536+2)
+                event(f,0,card=False);f.signal('cycle',True);f.state['keys'][86]=True
+                self.assertTrue(event(f,.01,card=False).cycle.pressed)
+                self.assertIsNone(f.state.published)
+
+    def test_damaged_unknown_or_ambiguous_files_never_authorize_controls(self):
+        f=fixture();text=assignments_v22(f.state.assignments)
+        cases=[text.rsplit('end',1)[0],text.replace('format 2','format 3'),
+               text.replace('session 15','session 15\nsession 15'),text+'other\t11\t2\t15\n',
+               text.replace('\t15\n','\t16\n',1),text.replace('1234abcd','123456789'),
+               text.replace('action 11:3 clear','action 11:3 unknown'),
+               text.replace('end\n','other.mod\t10\t2\t15\nend\n'),
+               f.state.assignments+f.module.ids.save+'\t11\t4\n']
+        for malformed in cases:
+            with self.subTest(text=malformed[:60]):
+                result=f.module.parse_assignments(malformed)
+                self.assertIsNone(result[0]);self.assertIsInstance(result[1],str)
+
+    def test_new_mbm_registration_waits_for_its_published_reservation(self):
+        for legacy in (True,False):
+            with self.subTest(legacy_migration=legacy):
+                f=fixture();original=f.state.assignments
+                if not legacy:f.state.assignments=assignments_v22(original)
+                f.lua.execute('''state.menu.revision=0
+                    local register=state.menu.register_binding
+                    state.menu.register_binding=function(...)
+                        local ok,why=register(...)
+                        if ok then state.menu.revision=state.menu.revision+1 end
+                        return ok,why
+                    end''')
+                result=f.poll()
+                self.assertFalse(result.cycle.ready);self.assertEqual(f.state.reads,0)
+                reset=f.obj.reset(f.obj,f.lua.eval('function()error("backup must not run before ownership")end'))
+                self.assertIsNone(reset[0]);self.assertIn('publication',reset[1])
+                session=1 if legacy else 16
+                if not legacy:
+                    f.state.assignments=assignments_v22(original,session,seen=15)
+                    self.assertFalse(f.poll(.11).cycle.ready,'old reservation became active with a new header')
+                else:
+                    self.assertFalse(f.poll(.11).cycle.ready)
+                f.state.assignments=assignments_v22(original,session)
+                self.assertTrue(f.poll(.22).cycle.ready)
+                event(f,.22,card=False);f.signal('cycle',True);f.state['keys'][86]=True
+                self.assertTrue(event(f,.23,card=False).cycle.pressed)
+                self.assertIsNone(f.state.published)
+
+
 class NativeControlTests(unittest.TestCase):
+    def test_session_profile_is_discovered_once_but_input_preimages_stay_fresh(self):
+        from input_fixtures import Fixture as InputFixture
+        f=InputFixture()
+        initial_registry=f.registry_reads
+        initial_login=sum(path.endswith('loginusers.vdf') for path in f.file_reads)
+        for time in (0,2,4,60):
+            f.obj.refresh(f.obj,time)
+            snapshot=f.obj.input_snapshot()
+            self.assertTrue(f.obj.validate_input_snapshot(snapshot))
+        self.assertEqual(f.registry_reads,initial_registry)
+        self.assertEqual(sum(path.endswith('loginusers.vdf') for path in f.file_reads),initial_login)
+        self.assertEqual(f.obj.profile_id,'76561198000000001')
+        f.files[snapshot.path]='// external edit\n'+f.files[snapshot.path]
+        rejected=f.obj.validate_input_snapshot(snapshot)
+        self.assertIsNone(rejected[0]);self.assertIn('concurrently',rejected[1])
+
+    def test_proton_uses_exact_game_identity_and_native_steam_root(self):
+        from input_fixtures import Fixture as InputFixture, LOGIN, CONFIG
+        f=InputFixture()
+        profile,account=f.module.steam_id(f.lua.eval(
+            'require("ffi").new("uint64_t",0x1100001)*4294967296+39734273'))
+        self.assertEqual((profile,account),('76561198000000001',39734273))
+        self.assertIsNone(f.module.steam_id(76561198000000000)[0])
+        root='/home/player/.steam/steam'
+        f.adapter.proton_root=lambda:root
+        identity=f.lua.eval('function(profile,account)return function()return profile,account end end')
+        f.adapter.steam_identity=identity(profile,account)
+        f.files[r'Z:\home\player\.steam\steam\config\loginusers.vdf']=LOGIN
+        f.files[r'Z:\home\player\.steam\steam\userdata\39734273\553850\remote\input_settings.config']=CONFIG
+        before=f.registry_reads
+        current=f.module.new(f.lua.table_from({'adapter':f.adapter}))
+        self.assertEqual(current.profile_id,profile)
+        self.assertTrue(current.input_path.startswith('Z:\\home\\player'))
+        self.assertEqual(f.registry_reads,before)
+        f.adapter.steam_identity=identity('76561198000000002',39734274)
+        rejected=f.module.new(f.lua.table_from({'adapter':f.adapter}))
+        self.assertIsNone(rejected[0]);self.assertIn('loginusers',rejected[1])
+        f.adapter.proton_root=lambda:False
+        self.assertIsNone(f.module.new(f.lua.table_from({'adapter':f.adapter}))[0])
+
     def test_cold_start_uses_game_bindings_without_editor_or_controls_file(self):
         f=fixture();f.state.editor_unknown=True
         f.poll();event(f,0,card=False);f.signal('cycle',True)
@@ -214,12 +318,27 @@ class DefaultAndResetTests(unittest.TestCase):
         f=fixture(seeded=False);f.state.context.default_state=f.state.marker;return f
 
     def test_first_use_registers_four_commands_and_sets_only_p_h_defaults(self):
-        f=self.new();f.poll()
-        self.assertEqual(f.state.published,2)
-        self.assertEqual(f.state.raw[1].mappings[1].button_id,80)
-        self.assertEqual(f.state.raw[4].mappings[1].button_id,72)
-        for i in (3,5):self.assertTrue(f.state.raw[i].unbound)
-        self.assertEqual(set(f.state.rows.keys()),set(f.module.ids.values()))
+        for current in (False,True):
+            with self.subTest(mbm22=current):
+                f=self.new();original=f.state.assignments
+                if current:
+                    f.state.assignments=assignments_v22(original)
+                    f.lua.execute('''state.menu.revision=0
+                        local register=state.menu.register_binding
+                        state.menu.register_binding=function(...)
+                            local ok,why=register(...)
+                            if ok then state.menu.revision=state.menu.revision+1 end
+                            return ok,why
+                        end''')
+                f.poll()
+                if current:
+                    self.assertIsNone(f.state.published)
+                    f.state.assignments=assignments_v22(original,16);f.poll(.11)
+                self.assertEqual(f.state.published,2)
+                self.assertEqual(f.state.raw[1].mappings[1].button_id,80)
+                self.assertEqual(f.state.raw[4].mappings[1].button_id,72)
+                for i in (3,5):self.assertTrue(f.state.raw[i].unbound)
+                self.assertEqual(set(f.state.rows.keys()),set(f.module.ids.values()))
         self.assertEqual(len(list(f.state.rows.keys())),4)
         self.assertTrue(event(f,0).save.ready)
 
@@ -343,10 +462,10 @@ class InputIntegrationTests(unittest.TestCase):
         ctx=dict(help_instance='weapon-A',help_open=True,preset_help_open=True)
         f.input.keys={82,67,120};f.ipoll(.01,help_instance='weapon-A')
         result=f.ipoll(.02,**ctx)
-        self.assertFalse(result.locale_pressed);self.assertFalse(result.export_pressed)
+        self.assertIsNone(result.locale_pressed);self.assertFalse(result.export_pressed)
         f.input.keys={82};f.ipoll(.03,**ctx)
-        f.input.keys={82,120};self.assertTrue(f.ipoll(.04,**ctx).locale_pressed)
-        self.assertFalse(f.ipoll(.05,**ctx).locale_pressed)
+        f.input.keys={82,120};self.assertIsNone(f.ipoll(.04,**ctx).locale_pressed)
+        self.assertIsNone(f.ipoll(.05,**ctx).locale_pressed)
         f.input.keys={82};f.ipoll(.06,**ctx)
         f.input.keys={82,67};self.assertTrue(f.ipoll(.07,**ctx).export_pressed)
         f.input.keys={82};f.ipoll(.08,**ctx)
@@ -354,37 +473,13 @@ class InputIntegrationTests(unittest.TestCase):
         property_ctx=dict(help_instance='weapon-A',help_open=True,preset_help_open=False)
         f.input.keys={82};f.ipoll(.1,**property_ctx)
         f.input.keys={82,67,86,120};result=f.ipoll(.11,**property_ctx)
-        self.assertTrue(result.locale_pressed)
+        self.assertIsNone(result.locale_pressed)
         self.assertFalse(result.export_pressed);self.assertFalse(result.import_pressed)
         f.input.keys={82};f.ipoll(.12,**ctx)
         f.input.keys={67,120};result=f.ipoll(.13,**ctx)
-        self.assertFalse(result.locale_pressed);self.assertFalse(result.export_pressed)
+        self.assertIsNone(result.locale_pressed);self.assertFalse(result.export_pressed)
         f.state.missing=True;f.input.keys={82};f.ipoll(.14,**ctx)
-        f.input.keys={82,120};self.assertFalse(f.ipoll(.15,**ctx).locale_pressed)
-
-    def test_pressed_button_display_is_visible_scoped_read_only_and_cleared_on_loss(self):
-        f=self.fixture();f.ipoll(0)
-        self.assertEqual(f.input.diagnostic_reads,0)
-        ctx=dict(help_instance='weapon-A',help_open=True,preset_help_open=True)
-        f.input.keys={82,80};self.assertIsNone(f.ipoll(.01,**ctx).last_pressed_label)
-        f.input.keys={82};f.ipoll(.02,**ctx)
-        for index,(vk,label) in enumerate(((87,'W'),(120,'F9'),(6,'Mouse5'),(38,'Up'))):
-            t=.1+index*.1;f.input.keys={82,vk};result=f.ipoll(t,**ctx)
-            self.assertEqual(result.last_pressed_label,label)
-            self.assertTrue(result.last_pressed_changed)
-            self.assertFalse(result.cycle_pressed);self.assertFalse(result.reset_pressed)
-            f.input.keys={82};result=f.ipoll(t+.01,**ctx)
-            self.assertEqual(result.last_pressed_label,label)
-            self.assertFalse(result.last_pressed_changed)
-        self.assertNotIn(87,f.input.key_reads,'display must not add async polling of arbitrary keys')
-        f.input.keys={82,16,160};self.assertEqual(f.ipoll(.6,**ctx).last_pressed_label,'LShift')
-        f.input.keys={82};self.assertIsNone(f.ipoll(.7,help_instance='weapon-B',help_open=True,preset_help_open=True).last_pressed_label)
-        self.assertIsNone(f.ipoll(.8,help_instance='weapon-B',help_open=True,preset_help_open=False).last_pressed_label)
-        f.input.diagnostic_failure='incomplete';self.assertIsNone(f.ipoll(.9,**ctx).last_pressed_label)
-        f.input.diagnostic_failure=None;f.input.keys={82};f.ipoll(1,**ctx)
-        f.input.keys={82,87};self.assertEqual(f.ipoll(1.01,**ctx).last_pressed_label,'W')
-        f.input.keys={87};self.assertIsNone(f.ipoll(1.1,**ctx).last_pressed_label)
-        self.assertIsNone(f.input.poll(1.2,foreground=False,controls=ctx).last_pressed_label)
+        f.input.keys={82,120};self.assertIsNone(f.ipoll(.15,**ctx).locale_pressed)
 
     def test_opening_menu_tap_then_second_tap_clears_once(self):
         f=self.fixture();f.ipoll(0);f.input.keys={82};f.ipoll(.01,help_instance='weapon-A')
@@ -414,11 +509,11 @@ class InputIntegrationTests(unittest.TestCase):
         f.input.keys={82,119}
         self.assertFalse(f.ipoll(.26,help_instance='weapon-B',help_open=True,preset_help_open=True).clear_pressed)
 
-    def test_language_in_hud_only_and_unknown_menu_devices_keep_native_events(self):
+    def test_removed_language_key_is_inert_and_unknown_menu_devices_keep_native_events(self):
         f=self.fixture();f.lua.globals().set_native(1,None)
         ctx=dict(help_instance='weapon-A',help_open=True,preset_help_open=False,presets_enabled=False)
         f.ipoll(0);f.input.keys={82};f.ipoll(.01,**ctx)
-        f.input.keys={82,120};self.assertTrue(f.ipoll(.04,**ctx).locale_pressed)
+        f.input.keys={82,120};self.assertIsNone(f.ipoll(.04,**ctx).locale_pressed)
         f=self.fixture();native_button(f,1,7,device=1)
         ctx=dict(help_instance='weapon-A',help_open=True,preset_help_open=True)
         f.ipoll(0);f.input.keys={82};f.ipoll(.01,**ctx)
@@ -427,9 +522,12 @@ class InputIntegrationTests(unittest.TestCase):
         f.signal('save',True);self.assertTrue(f.ipoll(.15,**ctx).clear_pressed)
 
     def test_native_cycle_first_start_without_mods_or_binding_file(self):
-        f=self.fixture();before=dict(f.input.files);f.ipoll(0);f.ipoll(.01)
+        f=self.fixture();before=dict(f.input.files);f.ipoll(0)
+        self.assertTrue(f.ipoll(.01).cycle_assigned)
         f.signal('cycle',True);self.assertTrue(f.ipoll(.026).cycle_pressed)
         self.assertEqual(dict(f.input.files),before);self.assertIsNone(f.state.published)
+        f.lua.globals().set_native(3,None)
+        self.assertFalse(f.ipoll(.6).cycle_assigned)
 
     def test_all_commands_accept_numbers_arrows_oem_mouse_axes_controller_and_chords(self):
         cases=[
@@ -574,6 +672,17 @@ class InputIntegrationTests(unittest.TestCase):
 
 
 class PublicationOwnershipTests(unittest.TestCase):
+    def test_format2_old_reservation_cannot_authorize_default_or_reset_writes(self):
+        f=self.publication_fixture();original=f.state.assignments
+        f.obj.records.save=f.lua.table_from({'minimum_seen':16})
+        f.state.assignments=assignments_v22(original,16,seen=15)
+        rejected=f.state.prepare_publication(f.lua.globals().changes())
+        self.assertIsNone(rejected[0]);self.assertEqual(f.state.snapshot_reads,0)
+        f.state.assignments=assignments_v22(original,16)
+        plan=f.state.prepare_publication(f.lua.globals().changes());self.assertTrue(plan.validate())
+        f.state.assignments=assignments_v22(original,16,seen=15)
+        rejected=plan.validate();self.assertIsNone(rejected[0]);self.assertIn('ownership',rejected[1])
+
     def publication_fixture(self):
         f=MenuFixture()
         f.lua.execute('''

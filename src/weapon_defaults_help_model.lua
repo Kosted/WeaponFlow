@@ -27,6 +27,13 @@ end
 local function text_run(runs,value,accent)
     if value~="" then runs[#runs+1]={kind="text",text=value,accent=accent} end
 end
+local function icon_run(kind,value,name,hash,unavailable)
+    if type(hash)~="string" or #hash~=16 or not hash:match("^%x+$") or hash=="0000000000000000" then return nil end
+    local caption
+    if kind=="rpm" then caption=tostring(math.floor(value+0.5))
+    elseif kind=="zeroing" then caption=tr("mode.scope",{value=math.floor(value+0.5)}) end
+    return {kind="icon",hash=hash:lower(),text=name,caption=caption,unavailable=unavailable==true}
+end
 local function key_runs(runs,value)
     if value==tr("state.empty") then text_run(runs,value);return end
     -- Delimiters belong to input's binding-group formatter. Named punctuation
@@ -48,8 +55,8 @@ local function add_line(lines,parts)
         local value,accent=part[1],part[2]
         local first=#text+1
         text=text..value
-        if accent and value~=tr("state.empty") and value~="" then ranges[#ranges+1]={first,#text} end
-        if accent then key_runs(runs,value) else text_run(runs,value) end
+        if (accent or part.accent) and value~=tr("state.empty") and value~="" then ranges[#ranges+1]={first,#text} end
+        if accent then key_runs(runs,value) else text_run(runs,value,part.accent) end
     end
     lines[#lines+1]=text
     if #ranges>0 then lines.highlights[#lines]=ranges end
@@ -59,35 +66,22 @@ local function add_template(lines,key,values,accents)
     add_line(lines,Text.parts(key,values,accents))
 end
 local function trigger(value)
-    if Text.has("trigger."..tostring(value)) then return tr("trigger."..value) end
-    return (value and plain(value)) or tr("trigger.Press")
+    return Text.trigger(value) or tr("state.unavailable")
 end
-local function held_card(lines,card,pressed)
-    pressed=pressed and plain(pressed)
-    if pressed then
-        add_template(lines,"help.holding_pressed",{card=card,key=pressed},{card=true,key=true})
-    else add_template(lines,"help.holding",{card=card},{card=true}) end
-    lines[#lines+1]=""
-end
-local function settings_help(lines,show_settings)
-    local selected=Text.selected_language()
-    local id="language."..selected
-    add_template(lines,"help.language",{language=Text.has(id) and tr(id) or Text.upper(selected),key="F9"},{key=true})
-    if show_settings then add_template(lines,"help.settings",{}) end
-end
-local function display_options(lines,selected)
+local function display_options(lines,selected,compact)
     if selected~="icon" and selected~="text" then selected="both" end
     local parts=Text.parts("help.display",{icon=tr("display.icon"),text=tr("display.text"),both=tr("display.both")})
+    if compact then table.insert(parts,1,{"F10",true});table.insert(parts,2,{" "}) end
     add_line(lines,parts)
     local runs,ranges,at={},{},1
     for _,part in ipairs(parts) do
         local active=part.name==selected
-        text_run(runs,part[1],active)
+        if part[2] then key_runs(runs,part[1]) else text_run(runs,part[1],active) end
         if active then ranges[#ranges+1]={at,at+#part[1]-1} end
         at=at+#part[1]
     end
     lines.runs[#lines],lines.highlights[#lines]=runs,ranges
-    add_template(lines,"help.display_change",{key="F10"},{key=true})
+    if not compact then add_template(lines,"help.display_change",{key="F10"},{key=true}) end
 end
 local function offered(dir,target,modes,targets)
     if not dir or dir.present~=true or dir.presence_unknown or dir.kind~=target.kind then return false end
@@ -154,35 +148,58 @@ function M.preset_runs(preset,modes,ammo,icons)
             local name=label(target.kind,target.value,ammo) or tr("state.unavailable")
             local choice=icons and icons[side] and icons[side][target.value]
             local hash=choice and choice.kind==target.kind and choice.hash_hex
-            if type(hash)=="string" and #hash==16 and hash:match("^%x+$") and hash~="0000000000000000" then
-                local caption
-                if target.kind=="rpm" then caption=tostring(math.floor(target.value+0.5))
-                elseif target.kind=="zeroing" then caption=tr("mode.scope",{value=math.floor(target.value+0.5)}) end
-                runs[#runs+1]={kind="icon",hash=hash:lower(),text=name,caption=caption,unavailable=not available}
-            else text_run(runs,name) end
+            local symbol=icon_run(target.kind,target.value,name,hash,not available)
+            if symbol then runs[#runs+1]=symbol else text_run(runs,name) end
             if not available and name~=tr("state.unavailable") then text_run(runs," ("..tr("state.unavailable")..")") end
         end
     end
     if count==0 then text_run(runs,tr("state.empty")) end
     return runs
 end
-function M.presets(presets,modes,ammo,controls,limit,icons)
+function M.presets(presets,modes,ammo,controls,limit,icons,geometry)
     controls=controls or {}
     local card=binding(controls.card_label)
     local lines={highlights={}}
-    held_card(lines,card,controls.last_pressed_label)
     for index=1,limit==2 and 2 or 3 do
-        local parts=Text.parts("help.preset",{index=index,preset=M.preset_text(presets and presets[index],modes,ammo),
-            default=index==1 and tr("state.default") or "",key=tostring(index)},{key=true})
-        add_line(lines,parts)
-        local runs={}
-        for _,part in ipairs(parts) do
-            if part.name=="preset" then
-                for _,run in ipairs(M.preset_runs(presets and presets[index],modes,ammo,icons)) do runs[#runs+1]=run end
-            elseif part[2] then key_runs(runs,part[1])
-            else text_run(runs,part[1]) end
+        if geometry then
+            local preset=presets and presets[index]
+            local missing={}
+            local count=0
+            for _,side in ipairs(SIDES) do
+                local target=preset and preset.targets and preset.targets[side]
+                if target and not is_light(target) then
+                    count=count+1
+                    local dir=modes and modes.directions and modes.directions[side]
+                    local visible=false
+                    for _,cell in ipairs(geometry.directions and geometry.directions[side] or {}) do
+                        if cell.value==target.value and offered(dir,target,modes,preset.targets) then visible=true;break end
+                    end
+                    if not visible then
+                        local text=label(target.kind,target.value,ammo) or tr("state.unavailable")
+                        if text~=tr("state.unavailable") and not offered(dir,target,modes,preset.targets) then
+                            text=text.." ("..tr("state.unavailable")..")"
+                        end
+                        missing[#missing+1]=text
+                    end
+                end
+            end
+            local status=count==0 and (" ("..tr("state.empty")..")") or
+                (#missing>0 and (" | "..table.concat(missing,", ")) or "")
+            add_template(lines,"help.preset_edit",{index=index,key=tostring(index),
+                default=index==1 and tr("state.default") or "",status=status},{key=true})
+        else
+            local parts=Text.parts("help.preset",{index=index,preset=M.preset_text(presets and presets[index],modes,ammo),
+                default=index==1 and tr("state.default") or "",key=tostring(index)},{key=true})
+            add_line(lines,parts)
+            local runs={}
+            for _,part in ipairs(parts) do
+                if part.name=="preset" then
+                    for _,run in ipairs(M.preset_runs(presets and presets[index],modes,ammo,icons)) do runs[#runs+1]=run end
+                elseif part[2] then key_runs(runs,part[1])
+                else text_run(runs,part[1]) end
+            end
+            lines.runs[#lines]=runs
         end
-        lines.runs[#lines]=runs
     end
     lines[#lines+1]=""
     add_template(lines,"help.clear",{card=card,trigger=trigger(controls.clear_trigger),key=binding(controls.clear_label)},
@@ -195,7 +212,31 @@ function M.presets(presets,modes,ammo,controls,limit,icons)
         add_template(lines,"help.transfer",{copy=binding(controls.export_label),paste=binding(controls.import_label)},
             {copy=true,paste=true})
     end
-    settings_help(lines,true)
+    return lines
+end
+function M.onboarding(progress,controls)
+    local lines={highlights={}}
+    add_template(lines,"intro.title",{})
+    lines[#lines+1]=""
+    for _,name in ipairs({"presets","hud","swap"}) do
+        local key=name=="presets" and controls.save_label or name=="hud" and controls.hud_label
+        local done=progress[name]==true
+        local parts=done and {{"["},{"X",accent=true},{"] "}} or {{"[ ] "}}
+        local values,accents,message
+        if name~="swap" and key and key~="None" and key~="" then
+            message="intro."..name
+            values={card=binding(controls.card_label),trigger=trigger(name=="presets" and controls.save_trigger or controls.hud_trigger),key=binding(key)}
+            accents={card=true,key=true}
+        else
+            message="intro.swap"
+            values={action=tr("menu."..(name=="presets" and "save" or name=="hud" and "hud" or "cycle"),
+                {card=binding(controls.card_label)})}
+        end
+        for _,part in ipairs(Text.parts(message,values,accents)) do parts[#parts+1]=part end
+        add_line(lines,parts)
+    end
+    lines[#lines+1]=""
+    add_template(lines,"help.settings",{})
     return lines
 end
 function M.auto_side(modes)
@@ -206,13 +247,53 @@ function M.auto_side(modes)
             (dir.kind=="firemode" and (dir.current==5 or dir.current==6))) then return side end
     end
 end
-function M.property(modes,ammo,selected,controls)
+function M.wheel_marks(presets,modes,selected,limit,geometry,kind)
+    local marks={}
+    if kind=="property" and selected==nil then selected=M.auto_side(modes) end
+    for _,side in ipairs(SIDES) do
+        local dir=modes and modes.directions and modes.directions[side]
+        if dir and not is_light(dir) then
+            for _,cell in ipairs(geometry and geometry.directions and geometry.directions[side] or {}) do
+                local labels={}
+                if kind=="presets" then
+                    for index=1,limit==2 and 2 or 3 do
+                        local preset=presets and presets[index]
+                        local target=preset and preset.targets and preset.targets[side]
+                        if target and target.value==cell.value and offered(dir,target,modes,preset.targets) then
+                            labels[#labels+1]="P"..index
+                        end
+                    end
+                elseif selected==side and dir.readable and not dir.inactive and dir.current==cell.value then
+                    labels[1]="HUD"
+                end
+                if #labels>0 then marks[#marks+1]={x=cell.x,y=cell.y,w=cell.w,h=cell.h,side=side,label=table.concat(labels," / ")} end
+            end
+        end
+    end
+    return marks
+end
+function M.property(modes,ammo,selected,controls,native,geometry)
     controls=controls or {}
+    if geometry then
+        local lines={highlights={}}
+        display_options(lines,controls.hud_display,true)
+        add_template(lines,"help.property_edit",{trigger=trigger(controls.hud_trigger),key=binding(controls.hud_label)},
+            {key=true})
+        return lines
+    end
     local directions=modes and modes.directions or {}
     if selected==nil then selected=M.auto_side(modes) end
     local current=directions[selected]
     if not current or not current.present or is_light(current) then selected=nil end
-    local current_text=selected and (current.readable and label(current.kind,current.current,ammo) or nil) or nil
+    local current_text=selected and (current.readable and not current.presence_unknown and not current.inactive and
+        label(current.kind,current.current,ammo) or nil) or nil
+    local value_icon
+    local icon=native and native.directions and native.directions[selected]
+    if current_text and icon and not icon.reason and icon.current==current.current and
+       (icon.kind==current.kind or (current.kind=="firemode" and
+        ((icon.kind=="safe" and current.current==5) or (icon.kind=="unsafe" and current.current==6)))) then
+        value_icon=icon_run(current.kind,current.current,current_text,icon.hash_hex)
+    end
     local others={}
     for _,side in ipairs(SIDES) do
         local dir=directions[side]
@@ -222,15 +303,21 @@ function M.property(modes,ammo,selected,controls)
     end
     if selected then others[#others+1]=tr("state.hide") end
     local lines={highlights={}}
-    held_card(lines,binding(controls.card_label),controls.last_pressed_label)
-    add_template(lines,"help.property",{value=selected and (current_text or tr("state.unavailable")) or tr("state.hide")})
+    local parts=Text.parts("help.property",{value=selected and (current_text or tr("state.unavailable")) or tr("state.hide")})
+    add_line(lines,parts)
+    if value_icon then
+        local runs={}
+        for _,part in ipairs(parts) do
+            if part.name=="value" then runs[#runs+1]=value_icon else text_run(runs,part[1]) end
+        end
+        lines.runs[#lines]=runs
+    end
     add_template(lines,"help.others",{values=#others>0 and table.concat(others,", ") or tr("state.empty")})
     display_options(lines,controls.hud_display)
     add_template(lines,"help.change",{card=binding(controls.card_label),trigger=trigger(controls.hud_trigger),
         key=binding(controls.hud_label)},{card=true,key=true})
-    add_template(lines,"help.move",{card=binding(controls.card_label),up="UP",down="DOWN",left="LEFT",right="RIGHT"},
+    add_template(lines,"help.move",{card=binding(controls.card_label),up=tr("key.up"),down=tr("key.down"),left=tr("key.left"),right=tr("key.right")},
         {card=true,up=true,down=true,left=true,right=true})
-    settings_help(lines,false)
     return lines
 end
 return M

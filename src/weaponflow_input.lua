@@ -1,6 +1,6 @@
--- Game-owned WeaponFlow commands through Mod Bindings Menu v2.1.
+-- Game-owned WeaponFlow commands through Mod Bindings Menu v2.1 or v2.2.
 -- Read the actual card control, numbered save keys and HUD movement locally.
--- Fixed F9/C/V and menu-key double taps are scoped to visible contextual help.
+-- Fixed F10/C/V and menu-key double taps are scoped to visible contextual help.
 -- Never inject input or identify an equipped weapon from a button press.
 local M = {}
 
@@ -17,6 +17,23 @@ local function account_directory(id)
   local n = 0
   for digit in id:gmatch("%d") do n = (n * 10 + tonumber(digit)) % 4294967296 end
   return string.format("%.0f", n)
+end
+
+-- Exact Steam identity route used by Dive Ready; Lua numbers lose SteamID bits.
+function M.steam_id(value)
+  local ffi=require("ffi")
+  if type(value)~="cdata" or not ffi.istype("uint64_t",value) then return nil,"SteamID64 is not an exact integer" end
+  local raw=ffi.new("uint64_t[1]",value);local words=ffi.cast("uint32_t *",raw)
+  local low,high=tonumber(words[0]),tonumber(words[1]);local account=low
+  if high~=0x1100001 or low==0 then return nil,"invalid individual SteamID64" end
+  local digits={}
+  repeat
+    local quotient=math.floor(high/10);local rest=(high-quotient*10)*4294967296+low
+    low=math.floor(rest/10);high=quotient
+    digits[#digits+1]=string.char(48+rest-low*10)
+  until high==0 and low==0
+  local result={};for i=#digits,1,-1 do result[#result+1]=digits[i] end
+  return table.concat(result),account
 end
 
 -- Bounded SJSON / VDF parser; no loadstring, eval, or pattern matching across
@@ -129,6 +146,9 @@ local function native_adapter()
   local read_file = bind(win,"ReadFile","int","(void *, void *, unsigned long, unsigned long *, void *)")
   local close_file = bind(win,"CloseHandle","int","(void *)")
   local last_error = bind(win,"GetLastError","unsigned long","(void)")
+  local get_environment=bind(win,"GetEnvironmentVariableW","unsigned long","(const unsigned short *,unsigned short *,unsigned long)")
+  local get_module=bind(win,"GetModuleHandleA","void *","(const char *)")
+  local get_proc=bind(win,"GetProcAddress","void *","(void *,const char *)")
   local get_keyboard_state
   local hkcu = ffi.cast("void *", ffi.cast("intptr_t", -2147483647))
   local function wide(s)
@@ -145,15 +165,50 @@ local function native_adapter()
     if to_utf8(65001, 0, s, n, out, len, nil, nil) ~= len then return nil end
     return ffi.string(out, len)
   end
+  local steam_exports
+  local function steam_identity()
+    if not steam_exports then
+      local module=get_module("steam_api64.dll")
+      if module==nil or module==ffi.NULL then return nil,"game Steam API unavailable" end
+      steam_exports={}
+      for _,row in ipairs({{"user","SteamAPI_GetHSteamUser","int (*)(void)"},
+        {"pipe","SteamAPI_GetHSteamPipe","int (*)(void)"},
+        {"interface","SteamAPI_SteamUser_v021","void *(*)(void)"},
+        {"id","SteamAPI_ISteamUser_GetSteamID","uint64_t (*)(void *)"}}) do
+        local pointer=get_proc(module,row[2])
+        if pointer==nil or pointer==ffi.NULL then steam_exports=nil;return nil,"game Steam API export unavailable: "..row[2] end
+        steam_exports[row[1]]=ffi.cast(row[3],pointer)
+      end
+    end
+    local user,pipe=tonumber(steam_exports.user()),tonumber(steam_exports.pipe())
+    if user<=0 or pipe<=0 then return nil,"game Steam API not initialized" end
+    local owner=steam_exports.interface()
+    if owner==nil or owner==ffi.NULL then return nil,"game Steam user unavailable" end
+    local first,last=steam_exports.id(owner),steam_exports.id(owner)
+    if first~=last or user~=tonumber(steam_exports.user()) or pipe~=tonumber(steam_exports.pipe()) then
+      return nil,"game Steam user changed"
+    end
+    return M.steam_id(first)
+  end
   return {
+    proton_root=function()
+      local buffer=ffi.new("unsigned short[32768]")
+      local count=tonumber(get_environment(wide("STEAM_COMPAT_CLIENT_INSTALL_PATH"),buffer,32768))
+      if count==0 then return end
+      if count>=32768 then return false end
+      return utf8(buffer,count) or false
+    end,
+    steam_identity=steam_identity,
     registry_string = function(key, name)
       local buffer, size = ffi.new("unsigned short[4096]"), ffi.new("unsigned long[1]", 8192)
       if get_registry(hkcu, wide(key), wide(name), 2, nil, buffer, size) ~= 0 then return nil end
-      return utf8(buffer, tonumber(size[0]) / 2 - 1)
+      local count=tonumber(size[0])/2-1
+      if count<1 or count>=4096 or count%1~=0 or buffer[count]~=0 then return end
+      return utf8(buffer,count)
     end,
     registry_dword = function(key, name)
       local buffer, size = ffi.new("unsigned long[1]"), ffi.new("unsigned long[1]", 4)
-      if get_registry(hkcu, wide(key), wide(name), 16, nil, buffer, size) ~= 0 then return nil end
+      if get_registry(hkcu, wide(key), wide(name), 16, nil, buffer, size) ~= 0 or tonumber(size[0])~=4 then return nil end
       return tonumber(buffer[0])
     end,
     read_file = function(path)
@@ -362,13 +417,24 @@ local function read_candidates(adapter, candidates)
 end
 
 local function discover(adapter)
-  local path = adapter.registry_string(STEAM_KEY, "SteamPath")
-  if type(path) ~= "string" or path == "" then return nil, "SteamPath unavailable" end
+  local root=adapter.proton_root and adapter.proton_root()
+  local path,active,native_id
+  if root~=nil then
+    if type(root)~="string" or root:sub(1,1)~="/" or root:find("%z") then return nil,"native Linux Steam root unavailable" end
+    if type(adapter.steam_identity)~="function" then return nil,"game Steam identity provider unavailable" end
+    native_id,active=adapter.steam_identity()
+    if not native_id then return nil,active or "game Steam identity unavailable" end
+    path="Z:"..root
+  else
+    path=adapter.registry_string(STEAM_KEY,"SteamPath")
+    active=adapter.registry_dword(ACTIVE_KEY,"ActiveUser")
+  end
+  if type(path) ~= "string" or path == "" or path:find("%z") then return nil, "SteamPath unavailable" end
   path = path:gsub("/", "\\"):gsub("[\\/]+$", "")
-  local active = adapter.registry_dword(ACTIVE_KEY, "ActiveUser")
-  if type(active) ~= "number" or active <= 0 or active % 1 ~= 0 then
+  if type(active) ~= "number" or active <= 0 or active>=4294967296 or active % 1 ~= 0 then
     return nil, "active Steam account unavailable"
   end
+  if native_id and account_directory(native_id)~=string.format("%.0f",active) then return nil,"game Steam identity differs" end
   local login = adapter.read_file(path .. "\\config\\loginusers.vdf")
   local accounts, reason = parse(login)
   if not accounts or type(accounts.users) ~= "table" then
@@ -381,6 +447,19 @@ local function discover(adapter)
     end
   end
   if matches ~= 1 then return nil, "active Steam account ambiguous or missing from loginusers.vdf" end
+  if native_id and id~=native_id then return nil,"game Steam profile differs from loginusers.vdf" end
+  local current_path,current_active,current_id
+  if root~=nil then
+    if adapter.proton_root()~=root then return nil,"Steam profile changed during discovery" end
+    current_id,current_active=adapter.steam_identity();current_path="Z:"..root
+  else
+    current_path=adapter.registry_string(STEAM_KEY,"SteamPath")
+    current_active=adapter.registry_dword(ACTIVE_KEY,"ActiveUser")
+  end
+  if current_active~=active or current_id~=native_id or type(current_path)~="string" or
+     current_path:gsub("/","\\"):gsub("[\\/]+$","")~=path then
+    return nil,"Steam profile changed during discovery"
+  end
   local root = path .. "\\userdata\\" .. account_directory(id) .. "\\553850\\"
   local candidates = {root .. "remote\\input_settings.config",root .. "input_settings.config"}
   local appdata = adapter.getenv("APPDATA")
@@ -405,31 +484,27 @@ function M.new(options)
   local parsed_body, parsed_config
   local extra_keys, previous_foreground = {}, false
   local contextual={keys={},buttons={},taps={}}
-  local help_keys={}
   local menu_tap
   local previous_hud_arrows = {}
   local grenade = {next_refresh=0}
   local grenade_enabled = false
   local function input_snapshot(expected_config)
-    -- Mutation authorization uses fresh Steam discovery, not the ordinary
-    -- two-second read cache. A path/account change cannot be mistaken for
-    -- an empty profile or authorize writing the previous player's file.
-    local found,why=discover(adapter)
-    if not found then return nil,why end
-    if found.profile_id~=self.profile_id or found.account_id~=self.account_id then
-      return nil,"active Steam profile changed; restart required"
+    -- The game's Steam account is fixed for this process; mutable input bytes
+    -- still require a fresh exact preimage before any owned native publication.
+    if self.profile_id~=info.profile_id or self.account_id~=info.account_id then
+      return nil,"session Steam profile differs"
     end
-    local body,selected,reason,missing=read_candidates(adapter,found.candidates)
+    local body,selected,reason,missing=read_candidates(adapter,info.candidates)
     if body==nil then return nil,"input settings unreadable: "..tostring(reason) end
-    if selected~=found.input_path then return nil,"active input settings path changed during discovery" end
-    local config,failure=parse(body)
+    local config,failure=parsed_config
+    if body~=parsed_body or not config then config,failure=parse(body) end
     if not config then return nil,"invalid input config: "..tostring(failure) end
     if expected_config~=nil and (expected_config~=parsed_config or body~=parsed_body) then
       return nil,"input settings changed after default eligibility read"
     end
     local raw=body
     if missing then raw=nil end
-    return {path=selected,raw=raw,profile_id=found.profile_id}
+    return {path=selected,raw=raw,profile_id=info.profile_id}
   end
   local function validate_input_snapshot(snapshot)
     if type(snapshot)~="table" or snapshot.profile_id~=self.profile_id then
@@ -462,9 +537,6 @@ function M.new(options)
   local function refresh_grenade(time)
     grenade.next_refresh = time + 2
     local ok, groups, reason, label, signature = pcall(function()
-      if adapter.registry_dword(ACTIVE_KEY, "ActiveUser") ~= self.account_id then
-        return nil, "active Steam account changed; restart required"
-      end
       local body, _, read_error = read_candidates(adapter, info.candidates)
       if body == nil then return nil, "grenade input settings unreadable: " .. tostring(read_error) end
       if body ~= grenade.body then
@@ -516,7 +588,7 @@ function M.new(options)
       if grenade.previous and all and not grenade.previous[index] then pressed = true end
     end
     if pressed then
-      -- Revalidate the active account/file/layout before reporting an edge.
+      -- Revalidate the current input file/layout before reporting an edge.
       -- This refresh never changes Save/card readiness, revision or bindings.
       local signature = grenade.signature
       refresh_grenade(time)
@@ -529,17 +601,14 @@ function M.new(options)
 
   function self:refresh(time)
     self.next_refresh = time + 2
-    self.profile_valid = false
+    self.profile_valid = self.profile_id==info.profile_id and self.account_id==info.account_id
     self.input_config_valid = false
     local good, bindings, reason, source, unsupported = pcall(function()
-      if adapter.registry_dword(ACTIVE_KEY, "ActiveUser") ~= self.account_id then
-        return nil, "active Steam account changed; restart required"
-      end
-      self.profile_valid = true
+      if not self.profile_valid then return nil,"session Steam profile differs" end
       local body, selected, read_error, missing = read_candidates(adapter, info.candidates)
       self.input_path = selected
       if body == nil then return nil, "input settings unreadable: " .. tostring(read_error) end
-      -- Still read the current file and account on every refresh / Save edge.
+      -- Still read the current input file on every refresh / Save edge.
       -- Reuse only the syntax tree for identical bytes, never cached key state
       -- or scan-to-VK results (which may change with the keyboard layout).
       if body ~= parsed_body then
@@ -602,57 +671,6 @@ function M.new(options)
 
   local function discard_contextual()
     contextual={keys={},buttons={},taps={}};menu_tap=nil
-    help_keys={}
-  end
-  local function observe_help_buttons(controls,menu,allowed,card_held)
-    local out={}
-    local scope=allowed and card_held and menu.available==true and controls.help_open==true
-        and controls.help_instance~=nil and
-        (tostring(controls.help_instance)..":"..(controls.preset_help_open and "presets" or "property")) or nil
-    local opening=menu.save.pressed and not controls.preset_help_open or
-        menu.hud.pressed and (not controls.help_open or controls.preset_help_open)
-    local snapshot=adapter.keyboard_snapshot or adapter.diagnostic_keys
-    if not scope or opening or snapshot==nil then help_keys={};return out end
-    local ok,keys=pcall(snapshot)
-    if not ok or type(keys)~="table" then help_keys={};return out end
-    for vk=1,255 do
-      if type(keys[vk])~="boolean" then help_keys={};return out end
-    end
-    if help_keys.scope~=scope then help_keys={scope=scope} end
-    local skip={}
-    for _,group in ipairs(self.bindings) do for _,key in ipairs(group) do
-      skip[key.vk]=true
-      if key.vk==16 then skip[160]=true;skip[161]=true
-      elseif key.vk==17 then skip[162]=true;skip[163]=true
-      elseif key.vk==18 then skip[164]=true;skip[165]=true end
-    end end
-    -- Windows exposes both generic and left/right modifier states. Show the
-    -- concrete button once, rather than inventing two presses for one key.
-    if keys[160] or keys[161] then skip[16]=true end
-    if keys[162] or keys[163] then skip[17]=true end
-    if keys[164] or keys[165] then skip[18]=true end
-    local pressed={}
-    if help_keys.previous then
-      for vk=1,255 do
-        if keys[vk] and not help_keys.previous[vk] and not skip[vk] then
-          pressed[#pressed+1]=KEY_LABELS[vk] or Text.hud("input.keyboard",{id=vk})
-        end
-      end
-      -- A mapped controller/wheel button can have a game event without a
-      -- Windows keyboard state. Use the accepted action's actual label for
-      -- presentation only; never manufacture a command from this observer.
-      if #pressed==0 then
-        for _,name in ipairs({"save","hud","cycle","reset"}) do
-          local action=menu[name]
-          if action and action.pressed and type(action.label)=="string" and action.label~="" then
-            pressed[#pressed+1]=action.label
-          end
-        end
-      end
-    end
-    if #pressed>0 then help_keys.label=table.concat(pressed," + ");out.changed=true end
-    help_keys.previous=keys;out.label=help_keys.label
-    return out
   end
   local function menu_groups(binding)
     local groups,keys,ids={},{},{}
@@ -711,7 +729,6 @@ function M.new(options)
       contextual.keys[vk]=down
       return pressed
     end
-    out.locale_pressed=edge(120) -- F9
     if not controls.preset_help_open and controls.hud_enabled==true then
       out.hud_display_pressed=edge(121) -- F10, property help only.
     end
@@ -739,10 +756,10 @@ function M.new(options)
       end
     end
     if interrupted or save.pressed or out.clear_pressed then
-      out.locale_pressed,out.export_pressed,out.import_pressed,out.hud_display_pressed=false,false,false,false
+      out.export_pressed,out.import_pressed,out.hud_display_pressed=false,false,false
     end
     if out.export_pressed and out.import_pressed then out.export_pressed,out.import_pressed=false,false end
-    if out.locale_pressed or out.export_pressed or out.import_pressed or out.hud_display_pressed then contextual.taps={} end
+    if out.export_pressed or out.import_pressed or out.hud_display_pressed then contextual.taps={} end
     if out.clear_pressed and menu_bindings then menu_bindings:consume("save") end
     return out
   end
@@ -763,9 +780,6 @@ function M.new(options)
       self.menu_state=value
     end
     if self.menu_state then
-      local language,why=self.menu_state:language()
-      if not language then return nil,why end
-      Text.set_language(language)
       return self.menu_state:ensure_file()
     end
     return true
@@ -773,22 +787,6 @@ function M.new(options)
   end
 
   function self:cancel_events() discard_contextual();if menu_bindings then menu_bindings:cancel() end end
-  function self:cycle_language(time,foreground,before_write)
-    if type(before_write)~="function" or before_write()~=true then return nil,"language requires visible current help" end
-    local ready,why=self:ensure_menu_state(time)
-    if not ready or not self.menu_state then return nil,why or "menu language state unavailable" end
-    local selected=Text.next_language()
-    local ok,reason=self.menu_state:set_language(selected,function()
-      self:refresh(time)
-      if foreground~=true or not self.profile_valid or self.settings_reason then return nil,"language context changed" end
-      local gate=options.input_context or function()return PresetInputGate.context(options.native_reader)end
-      local safe,value=pcall(gate)
-      return safe and type(value)=="table" and value.allowed==true and before_write()==true
-    end)
-    if not ok then return nil,reason end
-    Text.set_language(selected)
-    return selected
-  end
   function self:consume_clear() contextual.taps={};menu_tap=nil end
   function self:cancel_weapon_events()
     discard_contextual()
@@ -875,7 +873,7 @@ function M.new(options)
     for _,name in ipairs(bindings_module.active_names) do
       if not menu[name] or not menu[name].active then
         menu[name]=bindings_module.describe_native(nil)
-        menu[name].ready=false;menu[name].reason="Mod Bindings Menu v2.1 action unavailable"
+        menu[name].ready=false;menu[name].reason="Mod Bindings Menu action unavailable"
       end
     end
     local save, cycle, property, reset = menu.save, menu.cycle, menu.hud, menu.reset
@@ -938,10 +936,10 @@ function M.new(options)
     end
     controls.clear_allowed=clear_reason==nil
     local system=contextual_actions(time,controls,menu,interactive,context_ok,card_held,#preset_edges)
-    local shown_keys=observe_help_buttons(controls,menu,interactive and context_ok,card_held)
-    if system.locale_pressed or system.export_pressed or system.import_pressed or system.clear_pressed or system.hud_display_pressed then self:refresh(time) end
+    if system.export_pressed or system.import_pressed or system.clear_pressed or system.hud_display_pressed then self:refresh(time) end
     local result = {
       pressed=presets_enabled and interactive and save.pressed and not save_reason,
+      gameplay_allowed=context_ok==true,
       down=save.down, ready=save_reason==nil, reason=save_reason,
       held_reload=card_held, profile_valid=self.profile_valid,
       binding_source=self.binding_source, binding_revision=self.revision, unsupported_bindings=self.unsupported_bindings,
@@ -952,10 +950,10 @@ function M.new(options)
       hud_label=property.label, hud_trigger=property.trigger_label,
       reset_label=reset.label, reset_trigger=reset.trigger_label,
       clear_label=save.label, clear_trigger="DoubleTap",
-      export_label="C",import_label="V",locale_label="F9",
+      export_label="C",import_label="V",
       contextual_help_open=controls.help_open==true,help_instance=controls.help_instance,
-      last_pressed_label=shown_keys.label,last_pressed_changed=shown_keys.changed==true,
       cycle_ready=presets_enabled and cycle_reason==nil, cycle_reason=cycle_reason,
+      cycle_assigned=cycle.ready==true and type(cycle.bindings)=="table" and #cycle.bindings>0,
       cycle_pressed=presets_enabled and interactive and cycle.pressed and not cycle_reason,
       hud_select_ready=controls.hud_enabled==true and property_reason==nil, hud_select_reason=property_reason,
       hud_select_pressed=controls.hud_enabled==true and interactive and property.pressed and not property_reason
@@ -966,13 +964,12 @@ function M.new(options)
       clear_pressed=presets_enabled and not clear_reason and system.clear_pressed==true,
       export_pressed=presets_enabled and system.export_pressed==true,
       import_pressed=presets_enabled and system.import_pressed==true,
-      locale_pressed=system.locale_pressed==true,
       hud_display_pressed=system.hud_display_pressed==true,
     }
     if self.profile_valid and not self.settings_reason then result.card_label=held_label or self.card_label end
     if controls.hud_enabled == true and controls.hud_move_armed == true and card_held and not save.down and
        not (save.pressed or cycle.pressed or property.pressed or reset.pressed or result.clear_pressed or
-            result.export_pressed or result.import_pressed or result.locale_pressed or result.hud_display_pressed) then
+            result.export_pressed or result.import_pressed or result.hud_display_pressed) then
       local move, active = {x=0,y=0}, false
       for _, arrow in ipairs(HUD_ARROWS) do
         if hud_arrows[arrow.vk] then
