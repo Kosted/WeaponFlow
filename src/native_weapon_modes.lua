@@ -108,10 +108,12 @@ function M.inspect(reader,snapshot)
             "weapon state registry identity differs from active weapon")
         local runtime=ptr(manager+0x58)+index*0x3f0
         local functions=read(runtime+0x350,16)
-        local state=read(ptr(manager+0x60)+index*12,12)
+        local state_address=ptr(manager+0x60)+index*12
+        local state=read(state_address,12)
         local mode,mask=u32(state,0),u32(state,4)
         local result={weapon_manager=manager,weapon_eid=eid,weapon_bytes=weapon.bytes,
-            functions={},directions={},
+            functions={},directions={},functions_bytes=functions,runtime_address=runtime,
+            state_address=state_address,state_bytes=state,
             fire_mode_raw=mode,mask_raw=mask,live_verified=false,
             source="native_current_instance_weapon_data"}
         -- Definition reads are not prerequisites for RPM or flashlight. Resolve
@@ -141,6 +143,7 @@ function M.inspect(reader,snapshot)
                 elseif action==3 then
                     check(mode<=8,"selected fire mode outside known native enum")
                     local fire=read(definition_address()+0x90,12)
+                    dir.choice_address,dir.choice_bytes=result.definition_address+0x90,fire
                     local slots,contiguous={},true
                     local seen_zero=false
                     for slot=0,2 do
@@ -171,6 +174,7 @@ function M.inspect(reader,snapshot)
                     end
                 elseif action==1 then
                     local scope=read(definition_address()+0x154,12)
+                    dir.choice_address,dir.choice_bytes=result.definition_address+0x154,scope
                     local slots,all_positive={},true
                     for slot=0,2 do
                         local value=float32(scope,slot*4)
@@ -192,7 +196,13 @@ function M.inspect(reader,snapshot)
                     local pi=lookup(read(pm+0x50,20),eid,MAX_HASH)
                     check(pi~=nil and pi<MAX_INDEX,"projectile RPM entry unavailable or beyond read budget")
                     check(read(ptr(ptr(pm+0x68)+pi*8),24)==weapon.bytes,"RPM registry identity mismatch")
-                    local rpm=read(ptr(pm+0x70)+pi*32+0x10,16)
+                    local rpm_address=ptr(pm+0x70)+pi*32+0x10
+                    local rpm=read(rpm_address,16)
+                    local rate_address=ptr(pm+0x80)+pi*12+4
+                    local rate=read(rate_address,4)
+                    dir.rpm_manager,dir.rpm_index=pm,pi
+                    dir.choice_address,dir.choice_bytes=rpm_address,rpm
+                    dir.rate_address,dir.rate_bytes=rate_address,rate
                     local slots={}
                     for slot=0,2 do
                         local value=float32(rpm,slot*4)
@@ -202,7 +212,7 @@ function M.inspect(reader,snapshot)
                     end
                     dir.slot_values=slots
                     dir.slot=u32(rpm,12)
-                    dir.effective_rpm=float32(read(ptr(pm+0x80)+pi*12+4,4),0)
+                    dir.effective_rpm=float32(rate,0)
                     if dir.slot<3 and slots[dir.slot+1]>0 then
                         dir.current,dir.readable=slots[dir.slot+1],true
                         dir.cycle_supported=#dir.choices>1
@@ -270,6 +280,7 @@ M.cycle={rva=0x7552d0,signature_hex="48895C24204489442418555657415641574883EC30"
     arguments="RCX=WeaponDataManager, EDX=native weapon EID, R8D=WeaponFunctionType",
     result="unspecified; read the selected value again after the action"}
 M.function_kinds=KINDS
+M.definition_address=instance_definition
 M.layout={weapon_manager_rva=WEAPON_MANAGER,projectile_manager_rva=PROJECTILE_MANAGER,
     state_stride=12,runtime_stride=0x3f0,function_array_offset=0x350,
     definition_stride=0x4d0,definition_fire_modes_offset=0x90,definition_scope_zeroing_offset=0x154}

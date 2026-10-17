@@ -52,7 +52,8 @@ local function defaults(profile)
             "x=0.530000000000","y=0.550000000000",""},"\r\n")},
         {name="menu",suffix="-Menu.ini",max=4096,data=table.concat({
             "[menu]","schema=1","profile_id="..profile,
-            "save=false","cycle=false","hud=false","reset=false",""},"\r\n")},
+            "save=false","cycle=false","hud=false","reset=false",
+            "intro_presets=false","intro_hud=false","intro_swap=false","first_run=true",""},"\r\n")},
     }
     return files
 end

@@ -79,8 +79,8 @@ function M.entries(modes,native,icons,selected,display)
 end
 function M.new(options)
  local sr=rawget(_G,"stingray") or {}
- local api=options.api or {App=sr.Application,World=sr.World,Gui=sr.Gui,Vector2=sr.Vector2,Color=sr.Color}
- if not api.App or not api.World or not api.Gui or not api.Vector2 or not api.Color or
+ local api=options.api or {App=sr.Application,World=sr.World,Gui=sr.Gui,Vector2=sr.Vector2,Vector3=sr.Vector3,Color=sr.Color}
+ if not api.App or not api.World or not api.Gui or not api.Vector2 or not api.Vector3 or not api.Color or
     type(api.App.worlds)~="function" or type(api.World.num_units)~="function" or
     type(api.World.create_screen_gui)~="function" or type(api.World.destroy_gui)~="function" or
     type(api.Gui.rect)~="function" or type(api.Gui.render_resolution)~="function" then
@@ -111,7 +111,7 @@ function M.new(options)
  function self:_drop()
   -- Never pass a GUI's old world back to the engine after it disappeared.
   local gui,owner=self.gui,self.owner
-  self.gui,self.owner,self.shown,self.painted=nil,nil,nil,nil
+  self.gui,self.owner,self.shown,self.painted,self.editor_box=nil,nil,nil,nil,nil
   if not gui then return {status="no_gui"} end
   local list,why=worlds()
   if why then return {status="owner_unavailable"},why end
@@ -122,13 +122,14 @@ function M.new(options)
  end
  function self:_ensure()
   if self.closed then return nil,"HUD shut down" end
-  local list=worlds()
-  local best,count=nil,-1
-  for _,world in ipairs(list) do
-   local ok,n=pcall(api.World.num_units,world)
-   if ok and type(n)=="number" and n>count then best,count=world,n end
+  local list,why=worlds()
+  -- Dive Ready's live GUI matrix identified World2 as the unprocessed UI world.
+  local best=list[2]
+  if why or not best then self:_drop();return nil,why or "screen UI world unavailable" end
+  local ok,n=pcall(api.World.num_units,best)
+  if not ok or type(n)~="number" or n~=n or n<0 or n==math.huge then
+   self:_drop();return nil,"screen UI world unreadable"
   end
-  if not best then return nil,"render world unavailable" end
   if self.gui and self.owner==best then return true end
   if self.gui then self:_drop() end
   self.gui,self.owner,self.shown,self.painted=nil,nil,nil,nil
@@ -145,7 +146,7 @@ function M.new(options)
   if selected then self.entries={};self:_drop() end
   return selected,why
  end
- function self:set(modes,native,selected)
+ function self:set(modes,native,selected,time,identity)
   local entries,unknown=M.entries(modes,native,self.icons,selected,self.display)
   self.entries={}
   for _,entry in ipairs(entries) do
@@ -162,6 +163,31 @@ function M.new(options)
     self.log("HUD_SKIP reason="..issue.reason..(issue.hash and (" icon="..issue.hash) or "").." display="..self.display)
    end
   end
+  local entry=self.entries[1]
+  local previous=self.observed
+  if entry and type(identity)=="string" and type(time)=="number" then
+   if not self.editing and previous and previous.identity==identity and previous.side==entry.side and
+      (previous.kind~=entry.kind or previous.value~=entry.value) then
+    self.flash_until=time+0.22;self.next_render=0
+   end
+   self.observed={identity=identity,side=entry.side,kind=entry.kind,value=entry.value}
+  else self.observed=nil;self.flash_until=nil end
+ end
+ function self:edit(enabled,hidden,key,trigger)
+  enabled=enabled==true
+  if enabled and hidden==nil then hidden=self.ghost else hidden=hidden==true end
+  key=enabled and Text.clean(key,160) or nil
+  local changed=self.editing~=enabled or self.ghost~=hidden or self.reveal_key~=key
+  if changed then self.next_render=0;self.next_size=0 end
+  self.editing,self.ghost,self.reveal_key,self.reveal_trigger=enabled,hidden,key,trigger
+  if enabled then self.flash_until=nil end
+  return changed
+ end
+ function self:editor_bounds()
+  if not self.editing or not self.editor_box or not self.shown then return nil end
+  local x,y=self.layout:position()
+  return {x=x,y=y,w=self.editor_box.w,h=self.editor_box.h,hidden=self.ghost,
+      key=#self.entries>0 and self.reveal_key or nil,trigger=self.reveal_trigger}
  end
  function self:finish_move()
   self.preview=false
@@ -184,7 +210,7 @@ function M.new(options)
   return true
  end
  function self:hide()
-  self:finish_move();self.entries={};self:_drop()
+  self:finish_move();self.entries={};self.editing=false;self.observed=nil;self.flash_until=nil;self:_drop()
  end
  function self:shutdown()
   if self.closed then return {status="already_closed"} end
@@ -203,7 +229,7 @@ function M.new(options)
   return self.layout:move(time,intent)
  end
  local function rect(gui,x,y,w,h,colour)
-  return api.Gui.rect(gui,api.Vector2(x,y),api.Vector2(w,h),colour)
+  return api.Gui.rect(gui,api.Vector3(x,y,1022),api.Vector2(w,h),colour)
  end
  local function text_metrics(value)
   if type(value)~="string" or value=="" then return nil end
@@ -234,14 +260,18 @@ function M.new(options)
   for _,ch in Text.characters(value) do
    local glyph=font.glyphs[ch]
    if glyph then
-    for _,run in ipairs(glyph.r) do
+    local filtered=font.pixels and font.pixels(glyph,cell)
+    for _,run in ipairs(filtered or glyph.r) do
      local alpha=run[4]
      local colour=text_colours[alpha]
      if not colour then
-      colour=api.Color(math.floor(alpha*235/255+0.5),240,240,226);text_colours[alpha]=colour
+      colour=api.Color(math.floor(alpha*(self.ghost and self.editing and 90 or 235)/255+0.5),
+          self.flashing and 255 or 240,self.flashing and 215 or 240,self.flashing and 65 or 226);text_colours[alpha]=colour
      end
      local h=run[5] or 1
-     rect(gui,x+(glyph.bearing+run[2])*cell,y+(bottom-run[1]-h)*cell,run[3]*cell,h*cell,colour)
+     if filtered then
+      rect(gui,math.floor(x+glyph.bearing*cell+run[2]+0.5),math.floor(y+bottom*cell-run[1]-h+0.5),run[3],h,colour)
+     else rect(gui,x+(glyph.bearing+run[2])*cell,y+(bottom-run[1]-h)*cell,run[3]*cell,h*cell,colour) end
     end
     x=x+glyph.advance*cell
    end
@@ -264,9 +294,11 @@ function M.new(options)
   if self.closed then return end
   if time<self.next_render then return end
   self.next_render=time+1/30
-  if #self.entries==0 and not self.preview then self:_drop();return end
+  self.flashing=not self.editing and self.flash_until~=nil and time<self.flash_until
+  if #self.entries==0 and not self.preview and not self.editing then self:_drop();return end
   local x,y=self.layout:position()
-  local parts={tostring(math.floor(x)),tostring(math.floor(y)),tostring(self.preview),self.display}
+  local parts={tostring(math.floor(x)),tostring(math.floor(y)),tostring(self.preview),self.display,
+      tostring(self.editing),tostring(self.ghost),tostring(self.flashing)}
   for _,e in ipairs(self.entries) do parts[#parts+1]=e.kind..":"..tostring(e.value)..":"..tostring(e.hash)..":"..tostring(e.text) end
   local signature=table.concat(parts,"|")
   if signature==self.shown and time<self.next_size then return end
@@ -296,7 +328,7 @@ function M.new(options)
     total_width=total_width+width+gap;content_height=math.max(content_height,h)
    end
   end
-  if #plan==0 and not self.preview then self:_drop();return end
+  if #plan==0 and not self.preview and not self.editing then self:_drop();return end
   if #plan==0 then total_width,content_height=size+gap,80*scale end
   local bw,bh=total_width+2*pad,content_height+2*pad
   local bounded,bounds_error=self.layout:set_bounds(rw,rh,bw,bh)
@@ -322,7 +354,9 @@ function M.new(options)
       local h=run[5] or 1
       rect(self.gui,icon_x+run[2]*cell,y+pad+item.icon_offset+(grid-run[1]-h)*cell,
        run[3]*cell,h*cell,
-       api.Color(alpha[run[4]],dark and 0 or 240,dark and 0 or 240,dark and 0 or 226))
+       api.Color(math.floor(alpha[run[4]]*(self.ghost and self.editing and 0.38 or 1)+0.5),
+          dark and 0 or (self.flashing and 255 or 240),dark and 0 or (self.flashing and 215 or 240),
+          dark and 0 or (self.flashing and 65 or 226)))
      end
     end
     runs(sprite.s,sprite.sg or sprite.g,self.icons.shadow_alpha,true)
@@ -332,7 +366,7 @@ function M.new(options)
     text(self.gui,line,px+item.width/2,y+pad+item.line_y[index],item.height,item.width)
    end
   end
-  self.shown=table.concat(parts,"|");self.painted=signature
+  self.shown=table.concat(parts,"|");self.painted=signature;self.editor_box={w=bw,h=bh}
   return true
  end
  return self

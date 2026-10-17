@@ -71,7 +71,9 @@ function M.windows_adapter()
     local function bind(dll, name, declaration)
         local ok, fn = pcall(function() return dll[name] end)
         if not ok then ffi.cdef(declaration); fn = dll[name] end
-        return fn
+        local result,args=declaration:match("^(.-)"..name.."(%b());$")
+        assert(result and args,"invalid local Windows API declaration")
+        return ffi.cast(result.." (__stdcall *)"..args,fn)
     end
     local get_module = bind(kernel, "GetModuleHandleA", "void *GetModuleHandleA(const char *);")
     local get_path = bind(kernel, "GetModuleFileNameA",

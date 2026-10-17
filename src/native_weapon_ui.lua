@@ -97,6 +97,94 @@ end
 function M.inspect(reader,snapshot)
     return inspect(reader,snapshot,false)
 end
+-- Welcome visibility needs only the game's UI context, not a weapon/card.
+function M.context(reader)
+    if type(reader)~="table" or type(reader.verify)~="function" then return nil,"native context reader required" end
+    local verified,why=reader:verify();if not verified then return nil,why end
+    return reader:transaction(function(read,ptr)
+        for index=#ANCHORS-1,#ANCHORS do
+            local anchor=ANCHORS[index]
+            check(read(reader.game+anchor.rva,#anchor.bytes)==anchor.bytes,"native UI context code changed")
+        end
+        local context=ptr(reader.game+UI_CONTEXT_GLOBAL)
+        return {context=context,context_kind=u32(read(context+UI_CONTEXT_KIND,4),0)}
+    end,"native-ui-context")
+end
+
+-- Stock 1828070 refreshes these exact choice widgets with native slot order.
+-- The shared widget stores final pixel position148/156 and scales100/140.
+local CHOICES={up=0x1c58,left=0x4378,right=0x66a0,down=0x9eb0}
+local GEOMETRY_ANCHORS={
+    {rva=0x1828210,hex="488daf581c0000418bf4"},
+    {rva=0x18282ce,hex="488daf78430000418bf4"},
+    {rva=0x1828391,hex="488dafa0660000418bf4"},
+    {rva=0x1828451,hex="488dafb09e0000418bf4"},
+    {rva=0x1828289,hex="ffc64881c57806000083fe037289"},
+}
+for _,anchor in ipairs(GEOMETRY_ANCHORS) do anchor.bytes=unhex(anchor.hex) end
+local function real(bytes,offset)
+    local word=u32(bytes,offset);local exponent=math.floor(word/8388608)%256
+    check(exponent~=255,"non-finite wheel geometry")
+    local mantissa=word%8388608
+    local value=exponent==0 and mantissa*2^-149 or (1+mantissa/8388608)*2^(exponent-127)
+    return word>=2147483648 and -value or value
+end
+function M.choice_geometry(reader,snapshot,modes)
+    local captured,why=M.inspect(reader,snapshot)
+    if not captured then return nil,why end
+    if captured.hidden or captured.dirty or captured.cached_eid~=captured.active_eid then
+        return nil,"weapon wheel is closed or awaiting refresh"
+    end
+    return reader:transaction(function(read,ptr,lookup)
+        local active=reader:guard_active(snapshot,read,ptr,lookup)
+        check(type(modes)=="table" and modes.weapon_bytes==active.bytes and type(modes.functions)=="table",
+            "wheel modes belong to another weapon")
+        check(ptr(reader.game+UI_GLOBAL)==captured.root and ptr(reader.game+UI_CONTEXT_GLOBAL)==captured.context and
+            u32(read(captured.context+UI_CONTEXT_KIND,4),0)==4 and
+            read(captured.card+FLAGS_OFFSET,12)==captured.fields,"weapon wheel changed")
+        for _,anchor in ipairs(GEOMETRY_ANCHORS) do
+            check(read(reader.game+anchor.rva,#anchor.bytes)==anchor.bytes,"wheel choice layout changed")
+        end
+        local wm=active.weapon_manager
+        local wi=lookup(read(wm+0x30,20),active.entity.eid,1048576)
+        check(wi~=nil and wi<262144,"wheel weapon state unavailable")
+        local functions=read(ptr(wm+0x58)+wi*0x3f0+0x350,16)
+        local order={"left","right","up","down"}
+        for i,side in ipairs(order) do check(u32(functions,(i-1)*4)==modes.functions[side],"wheel function changed") end
+        local root=read(captured.card,160)
+        check(real(root,84)>0.01 and real(root,84)<=1.01,"weapon wheel is transparent")
+        local result={directions={},weapon_bytes=active.bytes}
+        for _,side in ipairs(order) do
+            local dir=modes.directions and modes.directions[side]
+            if dir and dir.present and not dir.presence_unknown and dir.action_enum~=5 and dir.kind~="flashlight" and
+               type(dir.slot_values)=="table" then
+                check(dir.action_enum==modes.functions[side] and #dir.slot_values<=6,"wheel direction metadata changed")
+                local rows={};result.directions[side]=rows
+                for index,value in ipairs(dir.slot_values) do
+                    local offered=false
+                    for _,choice in ipairs(dir.choices or {}) do if choice==value then offered=true;break end end
+                    local occurrences=0
+                    for _,choice in ipairs(dir.slot_values) do if choice==value then occurrences=occurrences+1 end end
+                    offered=offered and occurrences==1
+                    if offered then
+                        local raw=read(captured.card+CHOICES[side]+(index-1)*0x678,160)
+                        local alpha=real(raw,84)
+                        check(alpha>=0 and alpha<=1.01,"invalid wheel choice opacity")
+                        if alpha>0.01 then
+                            local w,h,sx,sy=real(raw,12),real(raw,16),real(raw,100),real(raw,140)
+                            local x,y=real(raw,148),real(raw,156)
+                            check(w>0 and h>0 and w<=1024 and h<=1024 and sx>0 and sy>0 and sx<=16 and sy<=16 and
+                                x>=0 and y>=0 and x<=32768 and y<=32768,"wheel choice geometry unavailable")
+                            rows[#rows+1]={value=value,slot=index-1,x=x,y=y,w=w*sx,h=h*sy}
+                        end
+                    end
+                end
+            end
+        end
+        reader:guard_active(snapshot,read,ptr,lookup)
+        return result
+    end,"native-weapon-wheel-geometry")
+end
 
 local write_one
 local function own_process_writer()
@@ -106,13 +194,13 @@ local function own_process_writer()
     local function bind(name,declaration)
         local ok,value=pcall(function() return kernel[name] end)
         if not ok then ffi.cdef(declaration); value=kernel[name] end
-        return value
+        local result,args=declaration:match("^(.-)"..name.."(%b());$")
+        check(result and args,"invalid local Windows API declaration")
+        return ffi.cast(result.." (__stdcall *)"..args,value)
     end
     local get_process=bind("GetCurrentProcess","void *GetCurrentProcess(void);")
     local write_memory=bind("WriteProcessMemory",
         "int WriteProcessMemory(void *, void *, const void *, size_t, size_t *);")
-    -- Keep the ABI exact even if another addon declared the Windows API first.
-    write_memory=ffi.cast("int (*)(void *, void *, const void *, size_t, size_t *)",write_memory)
     local process=get_process()
     local one=ffi.new("unsigned char[1]",1)
     local written=ffi.new("size_t[1]")
@@ -175,4 +263,5 @@ M.layout={ui_global_rva=UI_GLOBAL,card_offset=CARD_OFFSET,flags_offset=FLAGS_OFF
     dirty_offset=FLAGS_OFFSET+1,cached_eid_offset=FLAGS_OFFSET+4,display_eid_offset=FLAGS_OFFSET+8,
     requires_vtable=false,object_kind="plain embedded UI aggregate initialized by 1823910 -> 1446840"}
 M.anchors=ANCHORS
+M.geometry_anchors=GEOMETRY_ANCHORS
 return M
