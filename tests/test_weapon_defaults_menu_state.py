@@ -38,7 +38,8 @@ class MenuStateTests(unittest.TestCase):
             function text(save,cycle,hud,reset,other)
                 return '[menu]\r\nschema=1\r\nprofile_id='..(other or profile)..'\r\n'..
                     'save='..tostring(save)..'\r\ncycle='..tostring(cycle)..'\r\nhud='..tostring(hud)..
-                    '\r\nreset='..tostring(reset or false)..'\r\n'
+                    '\r\nreset='..tostring(reset or false)..'\r\n'..
+                    'intro_presets=false\r\nintro_hud=false\r\nintro_swap=false\r\nfirst_run=true\r\n'
             end
         ''')
 
@@ -76,16 +77,14 @@ class MenuStateTests(unittest.TestCase):
             assert(state:contains('save') and not files[marker]:find('pending',1,true))
         ''')
 
-    def test_language_is_optional_read_only_and_survives_marker_updates(self):
+    def test_retired_language_is_ignored_without_rewriting_on_read(self):
         self.run_lua('''
-            state=assert(opened());assert(state:language()=='auto' and #writes==0)
             files[marker]=text(false,false,false,false)..'language=pt-BR\\r\\n'
-            state=assert(opened());assert(state:language()=='pt-br' and #writes==0)
-            assert(state:begin('save') and state:mark('save'))
-            assert(state:language()=='pt-br')
             local before=files[marker]
-            assert(state:set_language('ru',function()return false end)==nil and files[marker]==before)
-            assert(state:set_language('ru',function()return true end) and state:language()=='ru')
+            state=assert(opened());assert(#writes==0 and files[marker]==before)
+            assert(state.language==nil and state.set_language==nil)
+            assert(state:begin('save') and state:mark('save'))
+            assert(not files[marker]:find('language=',1,true))
             assert(state:contains('save'))
         ''')
 
@@ -130,6 +129,32 @@ class MenuStateTests(unittest.TestCase):
                 assert(files[marker]==raw)
             end
             assert(#writes==0)
+        ''')
+
+    def test_welcome_progress_merges_legacy_markers_and_survives_restart_until_all_three_steps(self):
+        self.run_lua(r'''
+            files[marker]=text(true,false,true,false):gsub('intro_[^\r\n]+\r\n',''):gsub('first_run=true\r\n','')
+            local original=files[marker]
+            state=assert(opened());local p=assert(state:onboarding())
+            assert(p.first_run and not p.presets and #writes==0 and files[marker]==original)
+            p=assert(state:complete_step('presets'));assert(p.first_run and p.presets and not p.hud)
+            state=assert(opened());assert(state:onboarding().presets and state:contains('save'))
+            p=assert(state:complete_step('hud'));assert(p.first_run and p.hud)
+            p=assert(state:complete_step('swap'));assert(not p.first_run and p.swap)
+            local count=#writes
+            state=assert(opened());assert(not state:onboarding().first_run)
+            assert(state:complete_step('presets'));assert(#writes==count)
+            assert(files[marker]:find('first_run=false',1,true) and files[preset]=='CORRUPT PRESET MUST NOT BE READ')
+        ''')
+
+    def test_failed_welcome_write_does_not_mark_done_or_touch_other_settings(self):
+        self.run_lua('''
+            files[marker]=text(true,false,true,false);state=assert(opened())
+            local original=files[marker];write_fail='denied'
+            assert(state:complete_step('hud')==nil and files[marker]==original)
+            assert(not state:onboarding().hud)
+            write_fail=nil;assert(state:complete_step('hud').hud)
+            assert(state:contains('save') and state:contains('hud'))
         ''')
 
 

@@ -33,27 +33,54 @@ class HelpModelTests(unittest.TestCase):
 
     def test_property_uses_values_not_direction_names(self):
         lines = self.lines('left')
-        self.assertEqual(lines[2:4], ['CURRENT PROPERTY: FLAK', 'OTHER AVAILABLE PROPERTIES: 1150 RPM, 150 M, HIDE'])
-        self.assertEqual(lines[4], 'DISPLAY: ICON / TEXT / ICON AND TEXT')
-        self.assertEqual(lines[5], 'CHANGE DISPLAY: F10')
-        self.assertEqual(lines[6], 'CHANGE PROPERTIES: HOLD MOUSE5 + PRESS N')
+        self.assertEqual(lines[0:2], ['CURRENT PROPERTY: FLAK', 'OTHER AVAILABLE PROPERTIES: 1150 RPM, 150 M, HIDE'])
+        self.assertEqual(lines[2], 'DISPLAY: ICON / TEXT / ICON AND TEXT')
+        self.assertEqual(lines[3], 'CHANGE DISPLAY: F10')
+        self.assertEqual(lines[4], 'CHANGE PROPERTIES: HOLD MOUSE5 + PRESS N')
         self.assertNotIn('CURRENT PROPERTY: AUTO',' '.join(lines))
+
+    def test_current_property_uses_actual_native_icon_and_keeps_numeric_captions(self):
+        cases=[('programmable_ammo',325,'programmable_ammo',None),('firemode',5,'safe',None),
+               ('firemode',6,'unsafe',None),('firemode',3,'firemode',None),
+               ('rpm',1150,'rpm','1150'),('zeroing',150,'zeroing','150 M'),
+               ('laser_guide',1,'laser_guide',None),('binary_10',0,'binary_10',None),
+               ('secondary_fire',1,'secondary_fire',None)]
+        self.ammo.secondary_fire=self.lua.table_from({1:'Flamethrower'})
+        for kind,value,native_kind,caption in cases:
+            with self.subTest(kind=kind,value=value):
+                self.modes.directions.left=self.lua.table_from(dict(
+                    present=True,readable=True,kind=kind,current=value))
+                native=self.lua.table_from({'directions':{'left':dict(
+                    kind=native_kind,current=value,hash_hex='131742904d846798')}},recursive=True)
+                lines=self.model.property(self.modes,self.ammo,'left',self.controls,native)
+                symbols=[r for r in array_values(lines.runs[1]) if r.kind=='icon']
+                self.assertEqual(len(symbols),1)
+                self.assertEqual((symbols[0].hash,symbols[0].caption),('131742904d846798',caption))
+                self.assertEqual([r.text for r in array_values(lines.runs[1]) if r.kind=='text'],['CURRENT PROPERTY: '])
+                for field,bad in [('current',value+1),('kind','flashlight'),('hash_hex','0000000000000000')]:
+                    original=native.directions.left[field];native.directions.left[field]=bad
+                    fallback=self.model.property(self.modes,self.ammo,'left',self.controls,native)
+                    self.assertTrue(all(r.kind=='text' for r in array_values(fallback.runs[1])))
+                    native.directions.left[field]=original
+        hidden=self.model.property(self.modes,self.ammo,'None',self.controls,native)
+        self.assertEqual(hidden[1],'CURRENT PROPERTY: HIDE')
+        self.assertTrue(all(r.kind=='text' for r in array_values(hidden.runs[1])))
 
     def test_display_choices_highlight_only_current_style_without_keycap_boxes(self):
         for style, label in [('icon','ICON'),('text','TEXT'),('both','ICON AND TEXT')]:
             with self.subTest(style=style):
                 self.controls.hud_display=style
                 lines=self.model.property(self.modes,self.ammo,'left',self.controls)
-                selected=[run.text for run in lines.runs[5].values() if run.accent]
+                selected=[run.text for run in lines.runs[3].values() if run.accent]
                 self.assertEqual(selected,[label])
-                self.assertTrue(all(run.kind=='text' for run in lines.runs[5].values()))
-                self.assertEqual([run.text for run in lines.runs[6].values() if run.kind=='key'],['F10'])
+                self.assertTrue(all(run.kind=='text' for run in lines.runs[3].values()))
+                self.assertEqual([run.text for run in lines.runs[4].values() if run.kind=='key'],['F10'])
         lines=array_values(self.model.presets(None,self.modes,self.ammo,self.controls,3))
         self.assertNotIn('F10','\n'.join(lines))
 
 
     def test_legacy_flashlight_selection_is_hide(self):
-        self.assertEqual(self.lines('down')[2], 'CURRENT PROPERTY: HIDE')
+        self.assertEqual(self.lines('down')[0], 'CURRENT PROPERTY: HIDE')
 
 
     def test_presets_show_saved_values_not_current_values(self):
@@ -61,18 +88,18 @@ class HelpModelTests(unittest.TestCase):
             up={kind='zeroing',value=75},down={kind='flashlight',value=1}}},{targets={}},{targets={}}}''')
         lines=array_values(self.model.presets(presets,self.modes,self.ammo,self.controls,3))
         self.assertFalse(any('SAVE PRESETS' in line for line in lines))
-        self.assertEqual(lines[2], '1. ARMOR PIERCING, 700 RPM, 75 M (DEFAULT) | PRESS 1')
-        self.assertEqual(lines[3], '2. EMPTY | PRESS 2')
-        self.assertEqual(lines[4], '3. EMPTY | PRESS 3')
-        self.assertEqual(lines[5], '')
-        self.assertEqual(lines[7], 'CURRENT SWAP HOTKEY: PRESS SLASH')
+        self.assertEqual(lines[0], '1. ARMOR PIERCING, 700 RPM, 75 M (DEFAULT) | PRESS 1')
+        self.assertEqual(lines[1], '2. EMPTY | PRESS 2')
+        self.assertEqual(lines[2], '3. EMPTY | PRESS 3')
+        self.assertEqual(lines[3], '')
+        self.assertEqual(lines[5], 'CURRENT SWAP HOTKEY: PRESS SLASH')
 
     def test_two_choice_panel_has_no_third_row_or_shortcut(self):
         lines=array_values(self.model.presets(None,self.modes,self.ammo,self.controls,2))
         self.assertFalse(any(s.startswith('3.') or 'PRESS 3' in s for s in lines))
-        self.assertEqual([index for index,line in enumerate(lines) if line==''],[1,4])
-        self.assertTrue(lines[3].startswith('2.'))
-        self.assertTrue(lines[6].startswith('CURRENT SWAP HOTKEY:'))
+        self.assertEqual([index for index,line in enumerate(lines) if line==''],[2])
+        self.assertTrue(lines[1].startswith('2.'))
+        self.assertTrue(lines[4].startswith('CURRENT SWAP HOTKEY:'))
 
 
     def test_absent_module_preserves_saved_value_and_marks_unavailable(self):
@@ -82,31 +109,59 @@ class HelpModelTests(unittest.TestCase):
         self.assertEqual(preset.targets.up.value,150)
 
 
-    def test_both_panels_identify_held_card_but_only_presets_keep_settings_path(self):
-        for card in ('R','T','LCtrl + Mouse5 / Backspace'):
-            self.controls.card_label=card
-            for presets,lines in ((True,self.model.presets(None,self.modes,self.ammo,self.controls,2)),
-                                 (False,self.model.property(self.modes,self.ammo,'right',self.controls))):
-                self.assertEqual(lines[1],'CURRENTLY HOLDING: '+card.upper())
-                self.assertEqual(lines[2],'')
-                keys=[r.text for r in array_values(lines.runs[1]) if r.kind=='key']
-                self.assertEqual(keys,card.upper().replace(' / ',' + ').split(' + '))
-                self.assertEqual(any(line.startswith('SETTINGS:') for line in array_values(lines)),presets)
-                self.assertNotIn('THEN PRESS YOUR KEY',' '.join(array_values(lines)))
-                self.assertNotIn('CONFIGURE RESET',' '.join(array_values(lines)))
+    def test_help_omits_held_status_and_settings_route_while_welcome_keeps_actual_keys(self):
+        self.controls.card_label='T';self.controls.save_label='F8';self.controls.hud_label='Mouse5'
+        for lines in (self.model.presets(None,self.modes,self.ammo,self.controls,2),
+                      self.model.property(self.modes,self.ammo,'right',self.controls)):
+            text='\n'.join(array_values(lines))
+            self.assertNotIn('CURRENTLY HOLDING',text);self.assertNotIn('SETTINGS:',text)
+        welcome=self.model.onboarding(self.lua.table_from(dict(presets=True,hud=False,swap=False)),self.controls)
+        text='\n'.join(array_values(welcome))
+        self.assertIn('[X] OPEN PRESETS: HOLD T + F8 (PRESS)',text)
+        self.assertIn('[ ] CONFIGURE HUD: HOLD T + MOUSE5 (PRESS)',text)
+        self.assertEqual([r.text for r in welcome.runs[3].values() if r.accent],['X'])
+        self.assertFalse(any(r.accent for r in welcome.runs[4].values()))
+        self.assertIn('SETTINGS:',text);self.assertIn('SWAP PRESETS',text)
 
 
     def test_rich_presets_use_saved_value_icons_separated_by_plus(self):
         presets=self.lua.eval("{{targets={left={kind='programmable_ammo',value=101},right={kind='rpm',value=700},up={kind='zeroing',value=75}}}}")
         icons=self.lua.eval("{left={[101]={kind='programmable_ammo',hash_hex='123456789abcdef0'}},right={[700]={kind='rpm',hash_hex='1111111111111111'}},up={[75]={kind='zeroing',hash_hex='2222222222222222'}}}")
         lines=self.model.presets(presets,self.modes,self.ammo,self.controls,3,icons)
-        runs=array_values(lines.runs[3])
+        runs=array_values(lines.runs[1])
         symbols=[run for run in runs if run.kind=='icon']
         self.assertEqual([run.hash for run in symbols],['123456789abcdef0','1111111111111111','2222222222222222'])
         self.assertEqual([run.caption for run in symbols],[None,'700','75 M'])
         self.assertEqual(sum(run.kind=='text' and run.text==' + ' for run in runs),2)
         self.assertEqual(runs[-1].kind,'key');self.assertEqual(runs[-1].text,'1')
         self.assertTrue(all(not run.unavailable for run in symbols))
+
+    def test_wheel_marks_group_presets_by_semantic_choice_and_exclude_flashlight(self):
+        presets=self.lua.eval("{{targets={right={kind='rpm',value=700},up={kind='zeroing',value=150}}},{targets={right={kind='rpm',value=700}}},{targets={right={kind='rpm',value=1150},down={kind='flashlight',value=0}}}}")
+        geometry=self.lua.eval("{directions={right={{value=700,x=100,y=200,w=80,h=80},{value=1150,x=300,y=200,w=80,h=80}},up={{value=150,x=500,y=600,w=80,h=80}},down={{value=0,x=500,y=300,w=80,h=80}}}}")
+        marks=self.model.wheel_marks(presets,self.modes,None,3,geometry,'presets')
+        self.assertEqual([(r.x,r.label,r.side) for r in marks.values()],[(100,'P1 / P2','right'),(300,'P3','right'),(500,'P1','up')])
+        limited=self.model.wheel_marks(presets,self.modes,None,2,geometry,'presets')
+        self.assertFalse(any(r.label=='P3' for r in limited.values()))
+        current=self.model.wheel_marks(presets,self.modes,'right',3,geometry,'property')
+        self.assertEqual([(r.x,r.label,r.side) for r in current.values()],[(300,'HUD','right')])
+        self.assertEqual(len(self.model.wheel_marks(presets,self.modes,'None',3,geometry,'property')),0)
+        self.assertEqual(presets[3].targets.down.value,0)
+
+    def test_wheel_help_keeps_actions_empty_and_unavailable_without_repeating_marked_values(self):
+        presets=self.lua.eval("{{targets={right={kind='rpm',value=1150},up={kind='zeroing',value=150}}},{targets={}},{targets={right={kind='rpm',value=700}}}}")
+        geometry=self.lua.eval("{directions={right={{value=700},{value=1150}}}}")
+        self.modes.directions.up.present=False
+        lines=self.model.presets(presets,self.modes,self.ammo,self.controls,3,None,geometry)
+        self.assertIn('SAVE P1 (DEFAULT) | 150 M (UNAVAILABLE)',lines[1])
+        self.assertIn('SAVE P2 (EMPTY)',lines[2])
+        self.assertNotIn('1150','\n'.join(array_values(lines)))
+        self.assertNotIn('700','\n'.join(array_values(lines)))
+        self.assertTrue(any('CLEAR ALL' in row for row in lines.values() if isinstance(row,str)))
+        property_lines=self.model.property(self.modes,self.ammo,'right',self.controls,None,geometry)
+        self.assertEqual(len(property_lines),2)
+        self.assertIn('F10',property_lines[1]);self.assertIn('HIDE',property_lines[2])
+        self.assertFalse(any(word in '\n'.join(array_values(property_lines)) for word in ('1150','CURRENT PROPERTY','OTHER AVAILABLE','MOVE HUD')))
 
 
     def primary_return_fixture(self,choices=(1,),target=1):
@@ -135,7 +190,7 @@ class HelpModelTests(unittest.TestCase):
         self.assertEqual(self.modes.directions.left.current,1)
         self.assertIsNone(self.modes.directions.right.current)
         self.assertFalse(self.modes.directions.right.readable)
-        self.assertEqual(self.lines('right')[2],'CURRENT PROPERTY: UNAVAILABLE',
+        self.assertEqual(self.lines('right')[0],'CURRENT PROPERTY: UNAVAILABLE',
                          'a reachable preset is not the current ordinary mode')
 
 

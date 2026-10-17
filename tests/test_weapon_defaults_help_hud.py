@@ -15,7 +15,7 @@ class Fixture:
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         load_text(self.lua)
         self.env = self.lua.execute("""
-            local e={worlds={'a'},units={a=100,b=200},rw=1920,rh=1080,created={},destroyed={},
+            local e={worlds={'scene','a'},units={scene=100000,a=100,b=200},rw=1920,rh=1080,created={},destroyed={},
                 rects={},logs={},world_calls=0,size_calls=0}
             local function alive(world)
                 for _,value in ipairs(e.worlds) do if value==world then return true end end
@@ -50,12 +50,13 @@ class Fixture:
                         assert(select('#',...)==4,'proven rect API takes exactly four args')
                         local gui,pos,size,color=...
                         assert(alive(gui.world),'rect on dead world')
-                        assert(pos.vector and size.vector and color.color,'invalid API argument')
+                        assert(pos.vector and pos.z==1022 and size.vector and color.color,'invalid API argument')
                         e.rects[#e.rects+1]={gui=gui.id,x=pos.x,y=pos.y,w=size.x,h=size.y,
                             alpha=color.alpha,r=color.r,g=color.g,b=color.b}
                     end,
                 },
                 Vector2=function(x,y) return {vector=true,x=x,y=y} end,
+                Vector3=function(x,y,z) return {vector=true,x=x,y=y,z=z} end,
                 Color=function(alpha,r,g,b) return {color=true,alpha=alpha,r=r,g=g,b=b} end,
             }
             e.log=function(message)
@@ -91,13 +92,70 @@ class Fixture:
         return [dict(row) for row in self.env.rects.values()]
 
     def text_rectangles(self):
-        return [row for row in self.rectangles() if (row['r'],row['g'],row['b'])!=(10,13,15)]
+        return [row for row in self.rectangles() if (row['r'],row['g'],row['b']) in ((240,240,226),(255,220,90))]
 
     def clear_rectangles(self):
         self.env.rects = self.lua.table()
 
 
 class HelpHudTests(unittest.TestCase):
+    def test_exo_faces_decode_on_demand_and_filtered_pixels_preserve_coverage_and_cache(self):
+        f=Fixture()
+        self.assertEqual(len(list(f.font.glyphs.keys())),0)
+        self.assertIsNotNone(f.font.heading.glyphs['Ж'])
+        glyph=f.lua.table_from(dict(r=[[0,0,2,255,2]]),recursive=True)
+        small=f.font.pixels(glyph,.5)
+        self.assertEqual([list(r.values()) for r in small.values()],[[0,0,1,255,1]])
+        self.assertTrue(f.lua.eval('rawequal')(small,f.font.pixels(glyph,.5)))
+        other=f.font.pixels(glyph,.75)
+        coverage=sum(r[3]*r[4]*r[5] for r in other.values())
+        self.assertAlmostEqual(coverage,4*255*.75*.75,delta=2)
+
+    def test_edge_directions_hide_with_their_keycaps_and_hidden_hud_gets_a_beside_explanation(self):
+        f=Fixture();f.set(['HELP'])
+        for index,(x,y,count) in enumerate(((900,500,4),(900,0,3),(0,500,3),(1840,500,3),(900,990,3))):
+            box=f.lua.table_from(dict(x=x,y=y,w=80,h=90,hidden=False))
+            f.hud.set_overlay(f.hud,f.lua.table(),box);f.clear_rectangles();self.assertTrue(f.render(index*.1))
+            self.assertEqual(sum((r['r'],r['g'],r['b'])==(30,34,35) for r in f.rectangles()),count)
+            self.assert_bounds(f)
+        box=f.lua.table_from(dict(x=900,y=500,w=80,h=90,hidden=True,key='K',trigger='Press'))
+        f.hud.set_overlay(f.hud,f.lua.table(),box);f.clear_rectangles();self.assertTrue(f.render(.6))
+        hints=[r for r in f.rectangles() if (r['r'],r['g'],r['b'])==(12,15,16) and r['w']>120]
+        self.assertTrue(hints);self.assertGreater(min(r['x'] for r in hints),980)
+
+    def test_wheel_frames_and_indicator_arrows_repaint_move_and_stay_inside_viewport(self):
+        f=Fixture();f.set(['CURRENT PROPERTY: HIDE'])
+        marks=f.lua.table_from([dict(x=850,y=500,w=80,h=80,label='P1 / P2',side='up'),
+                               dict(x=650,y=500,w=120,h=80,label='P3',side='right'),
+                               dict(x=450,y=500,w=120,h=80,label='P2',side='left')],recursive=True)
+        indicator=f.lua.table_from(dict(x=1050,y=650,w=80,h=90,hidden=True,key='LCtrl + Mouse5'))
+        self.assertTrue(f.hud.set_overlay(f.hud,marks,indicator));self.assertTrue(f.render())
+        self.assert_bounds(f)
+        self.assertTrue(any((r['r'],r['g'],r['b'])==(255,215,65) for r in f.rectangles()))
+        for x,y in ((890,583),(890,497),(1090,743),(1090,647)):
+            self.assertFalse(any(r['x']<=x<r['x']+r['w'] and r['y']<=y<r['y']+r['h']
+                                 for r in f.rectangles() if (r['r'],r['g'],r['b'])==(255,215,65)),
+                             'both wheel marks and the HUD must have open top/bottom bracket gaps')
+        yellow=[r for r in f.rectangles() if (r['r'],r['g'],r['b'])==(255,215,65)]
+        for x in (510,710):
+            for y in (497,583):
+                self.assertTrue(any(r['x']<=x<r['x']+r['w'] and r['y']<=y<r['y']+r['h'] for r in yellow),
+                                'side properties have their long bracket strokes at the top and bottom')
+        for x in (447,573,647,773):
+            self.assertFalse(any(r['x']<=x<r['x']+r['w'] and r['y']<=540<r['y']+r['h'] for r in yellow),
+                             'side-property brackets must stay open at the left and right')
+        created=len(f.env.created);f.clear_rectangles()
+        self.assertTrue(f.hud.set_overlay(f.hud,marks,indicator));f.render(.05)
+        self.assertEqual(len(f.env.created),created);self.assertEqual(len(f.rectangles()),0)
+        for time,x,y in ((.2,8,8),(.4,1820,970)):
+            indicator.x,indicator.y=x,y;f.clear_rectangles()
+            self.assertTrue(f.hud.set_overlay(f.hud,marks,indicator));self.assertTrue(f.render(time))
+            self.assert_bounds(f)
+        f.clear_rectangles();self.assertTrue(f.render(.65))
+        self.assertTrue(any((r['r'],r['g'],r['b'],r['alpha'])==(255,215,65,145) for r in f.rectangles()))
+        self.assertTrue(any((r['r'],r['g'],r['b'],r['alpha'])==(255,215,65,245) for r in f.rectangles()),'arrows remain steady')
+        f.hide();self.assertEqual(len(f.hud.marks),0);self.assertIsNone(f.hud.indicator)
+
     def test_active_style_text_uses_yellow_and_colour_only_change_repaints(self):
         f=Fixture()
         def show(first,second):
@@ -131,8 +189,9 @@ class HelpHudTests(unittest.TestCase):
                  start+glyph.width*cell+space+(other.advance+glyph.bearing+glyph.width-other.bearing)*cell+space]
         shapes=[]
         for x in origins:
-            rows=[r for r in fixture.text_rectangles() if x-.00001 <= r['x'] < x+glyph.width*cell-.00001]
-            shapes.append(sorted((round(r['x']-x,6),round(r['y'],6),round(r['w'],6),round(r['h'],6),r['alpha']) for r in rows))
+            rows=[r for r in fixture.text_rectangles() if x-.6 <= r['x'] < x+glyph.width*cell+.4]
+            origin=min(r['x'] for r in rows)
+            shapes.append(sorted((round(r['x']-origin,6),round(r['y'],6),round(r['w'],6),round(r['h'],6),r['alpha']) for r in rows))
         self.assertTrue(shapes[0])
         self.assertEqual(shapes[0],shapes[1]);self.assertEqual(shapes[0],shapes[2])
 
@@ -148,23 +207,24 @@ class HelpHudTests(unittest.TestCase):
             self.assertLessEqual(row['y'] + row['h'], fixture.env.rh + 0.00001)
 
 
-    def test_fixed_text_anchor_and_antialiasing_with_padded_translucent_background(self):
+    def test_fixed_text_anchor_and_antialiasing_with_styled_translucent_panel(self):
         fixture = Fixture()
         fixture.set(["Preset 1: 1150 RPM", "R + P + 1: SAVE"])
         self.assertTrue(fixture.render())
         self.assert_bounds(fixture)
         rects = fixture.text_rectangles()
-        self.assertAlmostEqual(min(r['x'] for r in rects), 1920 * .52)
-        self.assertAlmostEqual(min(r['y'] for r in rects), 24)
+        self.assertAlmostEqual(min(r['x'] for r in rects), 1920 * .52,delta=1)
+        self.assertAlmostEqual(min(r['y'] for r in rects), 24,delta=1)
         self.assertGreater(len({r['alpha'] for r in rects}), 5)
         self.assertTrue(all((r['r'], r['g'], r['b']) == (240, 240, 226) for r in rects))
-        background=fixture.rectangles()[0]
-        self.assertEqual((background['alpha'],background['r'],background['g'],background['b']),(160,10,13,15))
-        self.assertAlmostEqual(background['x'],min(r['x'] for r in rects)-14)
-        self.assertAlmostEqual(background['y'],14)
-        self.assertAlmostEqual(background['x']+background['w'],max(r['x']+r['w'] for r in rects)+14)
-        self.assertAlmostEqual(background['y']+background['h'],max(r['y']+r['h'] for r in rects)+10)
-        self.assertEqual(len(fixture.rectangles()),len(rects)+1)
+        panels=[r for r in fixture.rectangles() if r['alpha']==232]
+        self.assertGreater(len({(r['r'],r['g'],r['b']) for r in panels}),5)
+        self.assertAlmostEqual(min(r['x'] for r in panels),min(r['x'] for r in rects)-14,delta=1)
+        self.assertAlmostEqual(min(r['y'] for r in panels),14)
+        self.assertAlmostEqual(max(r['x']+r['w'] for r in panels),max(r['x']+r['w'] for r in rects)+14,delta=1)
+        self.assertAlmostEqual(max(r['y']+r['h'] for r in panels),max(r['y']+r['h'] for r in rects)+10,delta=1)
+        self.assertTrue(any((r['r'],r['g'],r['b'])==(113,119,111) for r in fixture.rectangles()))
+        self.assertTrue(any((r['r'],r['g'],r['b'])==(255,233,0) for r in fixture.rectangles()))
 
 
     def test_keycaps_fit_any_supported_printable_binding_without_a_key_name_allowlist(self):
@@ -175,19 +235,19 @@ class HelpHudTests(unittest.TestCase):
                 self.assertTrue(fixture.render())
                 self.assert_bounds(fixture)
                 rows=fixture.rectangles()
-                self.assertEqual((rows[1]['r'],rows[1]['g'],rows[1]['b']),(142,142,130))
-                self.assertEqual((rows[2]['r'],rows[2]['g'],rows[2]['b']),(30,34,35))
-                accent=[r for r in rows if r['r']==255]
-                self.assertEqual(len(accent),sum(len(fixture.font.glyphs[ch].r) for ch in label))
-                self.assertGreaterEqual(rows[1]['w'],26)
-                self.assertAlmostEqual(rows[1]['y'],24)
+                key_edge=next(r for r in rows if (r['r'],r['g'],r['b'])==(142,142,130))
+                self.assertTrue(any((r['r'],r['g'],r['b'])==(30,34,35) for r in rows))
+                accent=[r for r in fixture.text_rectangles() if r['r']==255]
+                self.assertTrue(accent)
+                self.assertGreaterEqual(key_edge['w'],26)
+                self.assertAlmostEqual(key_edge['y'],24)
                 self.assertAlmostEqual(max(r['y']+r['h'] for r in accent)-min(r['y'] for r in accent),
                     (max(run[1]+(run[5] or 1) for ch in label for run in fixture.font.glyphs[ch].r.values())-
-                     min(run[1] for ch in label for run in fixture.font.glyphs[ch].r.values()))*14.4/fixture.font.height)
+                     min(run[1] for ch in label for run in fixture.font.glyphs[ch].r.values()))*14.4/fixture.font.height,delta=1)
                 self.assertAlmostEqual((min(r['x'] for r in accent)+max(r['x']+r['w'] for r in accent))/2,
-                    rows[1]['x']+rows[1]['w']/2)
+                    key_edge['x']+key_edge['w']/2,delta=1)
                 self.assertAlmostEqual((min(r['y'] for r in accent)+max(r['y']+r['h'] for r in accent))/2,
-                    rows[1]['y']+rows[1]['h']/2)
+                    key_edge['y']+key_edge['h']/2,delta=1)
 
 
     def test_unknown_unavailable_or_broken_graphics_use_only_provided_text_fallback(self):
@@ -201,8 +261,8 @@ class HelpHudTests(unittest.TestCase):
                 fixture.set({1:'FLAK','runs':{1:[{'kind':'icon','text':'FLAK','hash':'ffffffffffffffff','unavailable':True}]}})
                 self.assertTrue(fixture.render())
                 rows=fixture.text_rectangles()
-                self.assertEqual(len(rows),sum(len(fixture.font.glyphs[ch].r) for ch in 'FLAK'))
-                self.assertAlmostEqual(max(r['y']+r['h'] for r in rows)-min(r['y'] for r in rows),16.2)
+                self.assertTrue(rows)
+                self.assertAlmostEqual(max(r['y']+r['h'] for r in rows)-min(r['y'] for r in rows),16.2,delta=1)
 
 
     def test_production_model_mixed_native_icons_plus_keys_survives_reflow_and_hiding(self):
@@ -224,6 +284,24 @@ class HelpHudTests(unittest.TestCase):
         fixture.hide()
         self.assertIsNone(fixture.hud.gui)
         self.assertEqual(len(fixture.hud.runs),0)
+
+    def test_property_panel_renders_stock_icon_with_numeric_caption_and_updates_it(self):
+        f=Fixture(stock_icons=True)
+        model=f.lua.execute((ROOT/'src/weapon_defaults_help_model.lua').read_text())
+        modes=f.lua.eval("{directions={right={present=true,readable=true,kind='rpm',current=1150}}}")
+        native=f.lua.eval("{directions={right={kind='rpm',current=1150,hash_hex='f03c671b15d01a6b'}}}")
+        controls=f.lua.table_from({'card_label':'R','hud_label':'H'})
+        for time,value,hash_hex,width,height in ((0,1150,'f03c671b15d01a6b',1920,1080),
+                                               (.2,700,'52bbfc5a70359393',1280,720)):
+            modes.directions.right.current=value
+            native.directions.right.current=value;native.directions.right.hash_hex=hash_hex
+            lines=model.property(modes,None,'right',controls,native)
+            self.assertTrue(f.hud.set(f.hud,lines))
+            self.assertEqual((f.hud.runs[1][2].kind,f.hud.runs[1][2].caption),('icon',str(value)))
+            f.env.rw,f.env.rh=width,height;f.clear_rectangles()
+            self.assertTrue(f.render(time));self.assert_bounds(f)
+            self.assertEqual(f.hud.owner,'a')
+            self.assertTrue(f.icons.get(hash_hex))
 
 
     def test_actual_help_model_maximum_fields_and_property_states_fit_and_cache(self):
@@ -269,7 +347,7 @@ class HelpHudTests(unittest.TestCase):
         fixture = Fixture()
         fixture.set(["SAFE"])
         fixture.render()
-        fixture.env.worlds = fixture.lua.table_from(["b"])
+        fixture.env.worlds = fixture.lua.table_from(["scene","b"])
         fixture.render(.6)
         self.assertEqual(len(fixture.env.created), 2)
         self.assertEqual(len(fixture.env.destroyed), 0)

@@ -84,6 +84,11 @@ class NativeWeaponUICanary(unittest.TestCase):
         self.assert_only_dirty_byte_changed(before)
         self.assertEqual(self.context_buffer.raw, context_before)
 
+    def test_welcome_context_never_reads_or_requires_an_active_weapon(self):
+        self.reader[b'guard_active']=self.lua.eval(b'function()error("weapon read forbidden")end')
+        result=self.ui[b'context'](self.reader)
+        self.assertEqual(result[b'context_kind'],4)
+
 
     def test_same_cached_weapon_but_wrong_display_is_rejected_without_writing(self):
         self.write_local(self.root_buffer, FIELDS + 8, struct.pack("<I", 439))
@@ -127,6 +132,36 @@ class NativeWeaponUICanary(unittest.TestCase):
         self.assertIsNone(value)
         self.assertIn(b"unverified attachment", error)
         self.assertEqual(self.root_buffer.raw, before)
+
+    def test_choice_geometry_reads_only_live_native_slots_and_rejects_stale_card(self):
+        self.reader[b'guard_active']=self.lua.eval(b"function()return {entity={eid=404},bytes=string.rep('E',24),weapon_manager=0x51000000}end")
+        self.write_local(self.root_buffer,FIELDS,struct.pack('<BBBBII',0,0,0,0,404,404))
+        self.write_local(self.root_buffer,CARD+84,struct.pack('<f',1))
+        self.regions.update({0x51000030:struct.pack('<QIII',0x52000000,1,0xffffffff,1),
+                             0x52000000:struct.pack('<II',404,0),0x51000058:struct.pack('<Q',0x53000000),
+                             0x53000350:struct.pack('<4I',8,2,1,5)})
+        for _,anchor in self.ui[b'geometry_anchors'].items():self.regions[GAME+anchor[b'rva']]=anchor[b'bytes']
+        modes=self.lua.eval(b"{weapon_bytes=string.rep('E',24),functions={left=8,right=2,up=1,down=5},directions={left={present=true,kind='programmable_ammo',action_enum=8,slot_values={101,325},choices={101,325}},right={present=true,kind='rpm',action_enum=2,slot_values={700,850,1150},choices={700,850,1150}},up={present=true,kind='zeroing',action_enum=1,slot_values={25,75,150},choices={25,75,150}},down={present=true,kind='flashlight',action_enum=5}}}")
+        for start,count in ((0x4378,2),(0x66a0,3),(0x1c58,3)):
+            for index in range(count):
+                row=bytearray(160)
+                for offset,value in ((12,64),(16,64),(100,1.5),(140,1.5),(148,100+index*110),(156,400),(84,0 if index==1 else 1)):
+                    struct.pack_into('<f',row,offset,value)
+                self.write_local(self.root_buffer,CARD+start+index*0x678,bytes(row))
+        before=self.root_buffer.raw
+        result=self.ui[b'choice_geometry'](self.reader,self.snapshot,modes)
+        self.assertEqual([(row[b'value'],row[b'slot'],row[b'w']) for row in result[b'directions'][b'right'].values()],[(700,0,96),(1150,2,96)])
+        self.assertEqual(len(result[b'directions'][b'left']),1)
+        self.assertIsNone(result[b'directions'][b'down'])
+        self.assertEqual(self.root_buffer.raw,before)
+        for field in (0,1):
+            self.write_local(self.root_buffer,FIELDS+field,b'\1')
+            value,why=self.ui[b'choice_geometry'](self.reader,self.snapshot,modes)
+            self.assertIsNone(value);self.assertIn(b'closed or awaiting refresh',why)
+            self.write_local(self.root_buffer,FIELDS+field,b'\0')
+        self.regions[0x53000350]=struct.pack('<4I',8,3,1,5)
+        value,why=self.ui[b'choice_geometry'](self.reader,self.snapshot,modes)
+        self.assertIsNone(value);self.assertIn(b'function changed',why)
 
 
 if __name__ == "__main__":

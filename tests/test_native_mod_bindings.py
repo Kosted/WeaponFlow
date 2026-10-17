@@ -6,6 +6,7 @@ also checked against the existing original-code capture when it is available.
 from collections import Counter
 from pathlib import Path
 import os
+import hashlib
 import struct
 import unittest
 
@@ -171,6 +172,21 @@ class NativeModBindingsTests(unittest.TestCase):
         first = f.module[b"anchors"][1]
         f.regions[GAME + first[b"rva"]] = bytes(len(first[b"bytes"]))
         self.failure(f, 'code anchor mismatch')
+
+
+@unittest.skipUnless(os.name=='nt', 'Windows adapter interoperability')
+class WindowsApiInteropTests(unittest.TestCase):
+    def test_hash_reader_uses_own_buffers_after_other_mod_api_declarations(self):
+        lua=LuaRuntime(unpack_returned_tuples=True)
+        lua.execute('''require('ffi').cdef[[
+            long __stdcall BCryptGetProperty(void *,const unsigned short *,unsigned char *,
+                                             unsigned int,unsigned int *,unsigned int);
+        ]]''')
+        module=lua.execute((ROOT/'src/native_equipment_reader.lua').read_text(encoding='utf-8'))
+        api=module.windows_adapter()
+        actual=api.module_sha256(api.module(None))
+        expected=hashlib.sha256(Path(os.sys.executable).read_bytes()).hexdigest().upper()
+        self.assertEqual(actual,expected)
 
 
 if __name__ == '__main__':
