@@ -25,22 +25,16 @@ Keep both font licenses. Unsupported translated HUD lines fall back to English.
 Native MODS labels use the game's fonts. Complex shaping and right-to-left
 layout require a separate renderer step; they are not implemented.
 
-Language defaults to the game's **Text Language**, read before MODS opens.
-Auto uses English when there is no catalog for that language; a translation
-pack's forced override does not change WeaponFlow's Auto selection. The
-fixed F9 key cycles Auto, English and the other available catalogs only while
-one of WeaponFlow's contextual help panels is visible and the actual card
-control stays held. It has no MODS assignment. Its choice is stored in the own
-Menu.ini; HUD text rebuilds in the same accepted frame. MODS captions use that
-choice when the bindings page opens. C/V are likewise fixed keys, available
-only in the visible preset panel for account preset copy/replacement.
-F10 is fixed too: it cycles Icon, Text and Icon and text only in visible property
-help. Those choices use localized labels, with the current choice highlighted
+Language follows the game's **Text Language**, read before MODS opens.
+A missing catalog uses English; translation packs do not override the game's
+selected language. HUD text refreshes when the observed game language changes.
+There is no WeaponFlow language setting or language shortcut. Legacy language
+fields in Menu.ini are ignored and omitted on the next own-file mutation.
+
+C/V are fixed keys available only in the visible preset panel for account
+preset copy/replacement. F10 cycles Icon, Text and Icon and text only in visible
+property help. Those choices use localized labels, with the current choice
 yellow. The format is stored separately in the HUD profile.
-An optional `language=auto` / `language=en` / another language tag in
-`<SteamID64>-Menu.ini` selects it at startup. Change that field with the game
-closed. It contains no hotkey assignments. Reset mod restores Auto. Only tags
-with actual catalogs produce translated text.
 
 ## Adding another language
 
